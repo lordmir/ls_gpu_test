@@ -22,6 +22,11 @@ set(SOURCES
     main.cpp
     MainFrame.cpp
     GLCanvas.cpp
+    GLCanvasEntityEditor.cpp
+    GLCanvasWarpEditor.cpp
+    GLCanvasTileDoorEditor.cpp
+    GLCanvasObjectCoordinator.cpp
+    GLCanvasObjectSupport.cpp
     MapRenderer.cpp
     HeightmapRenderer.cpp
     SpriteRenderer.cpp

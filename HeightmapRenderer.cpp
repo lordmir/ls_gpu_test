@@ -694,6 +694,8 @@ void HeightmapRenderer::BuildDepthStencil()
     }
     std::stable_sort(cells.begin(), cells.end(), HeightmapDrawOrder);
 
+    // Populate the stencil buffer with per-cell depth buckets so later passes
+    // can cheaply test whether a fragment is behind terrain.
     glUseProgram(0);
     DisableFixedFunctionTexturing();
     ConfigureDepthStencilBuild();
@@ -856,6 +858,9 @@ void HeightmapRenderer::BuildEntityOcclusionStencil(
     }
     std::stable_sort(cells.begin(), cells.end(), HeightmapDrawOrder);
 
+    // Build an entity-local stencil mask:
+    // 0x02 marks the projected entity clip area, 0x01 marks occluding terrain.
+    // Sprite rendering then tests these bits to split visible vs occluded fragments.
     glUseProgram(0);
     DisableFixedFunctionTexturing();
     glClearStencil(0);

@@ -288,6 +288,8 @@ void MapRenderer::BuildForegroundCoverageStencil() {
     glUniform1i(glGetUniformLocation(m_map_shader_program, "u_num_blocks"), (int)(m_gd->GetRoomData()->GetCombinedBlocksetForRoom(m_current_room)->size()));
     glUniform1f(glGetUniformLocation(m_map_shader_program, "u_alpha"), 1.0f);
 
+    // This pass writes only to stencil (no color) for FG-priority pixels.
+    // Later passes can test bit 0x04 to know a sprite fragment is behind FG.
     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     glEnable(GL_STENCIL_TEST);
     glStencilMask(0x04);
@@ -437,6 +439,8 @@ GLuint MapRenderer::CreateShader(const std::string& vs_path, const std::string& 
     const char* vs_src = vs_src_str.c_str();
     const char* fs_src = fs_src_str.c_str();
 
+    // Standard OpenGL shader lifecycle: compile vertex+fragment shaders,
+    // then link them into a single executable GPU program object.
     GLuint vs = glCreateShader(GL_VERTEX_SHADER); glShaderSource(vs, 1, &vs_src, nullptr); glCompileShader(vs);
     GLint status; glGetShaderiv(vs, GL_COMPILE_STATUS, &status);
     if (status == GL_FALSE) { char log[512]; glGetShaderInfoLog(vs, 512, nullptr, log); std::cerr << "VS Error (" << vs_path << "): " << log << std::endl; }

@@ -706,11 +706,13 @@ void SpriteRenderer::Render(
                 glStencilMask(0x00);
                 glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
 
+                // Pass 1: draw only fragments that are NOT occluded.
                 bind_sprite_shader(m_opacity);
                 glStencilFunc(GL_NOTEQUAL, occlusion_stencil_ref, occlusion_stencil_mask);
                 DrawSpriteQuad(sx, sy, sw, sh, u0, u1, meta);
 
                 if (occlusion_mode == OcclusionMode::ObscuredTransparent) {
+                    // Pass 2: draw occluded fragments with reduced alpha for ghost mode.
                     bind_sprite_shader(m_opacity * 0.35f);
                     glStencilFunc(GL_EQUAL, occlusion_stencil_ref, occlusion_stencil_mask);
                     DrawSpriteQuad(sx, sy, sw, sh, u0, u1, meta);
@@ -886,6 +888,7 @@ GLuint SpriteRenderer::CreateShader(const std::string &vs_path, const std::strin
     const char *vs_src = vs_src_str.c_str();
     const char *fs_src = fs_src_str.c_str();
 
+    // Compile + link follows the same model as MapRenderer: source -> shader objects -> program.
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vs, 1, &vs_src, nullptr);
     glCompileShader(vs);

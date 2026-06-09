@@ -1,5 +1,6 @@
 #include "GLCanvas.h"
 #include "GLLoader.h"
+#include "GLCanvasObjectSupport.h"
 #include "PixelFont.h"
 #include <wx/dcclient.h>
 #include <algorithm>
@@ -10,15 +11,16 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
-#include <sstream>
 #include <set>
-#include <wx/log.h>
+#include <sstream>
 #include <utility>
+#include <wx/log.h>
 #include <landstalker/misc/Utils.h>
 
 using namespace Landstalker;
 
 namespace {
+// File-local rendering/math helpers used only by GLCanvas.
 int GLCanvasAttributes[] = {
     WX_GL_RGBA,
     WX_GL_DOUBLEBUFFER,
@@ -192,6 +194,36 @@ enum class TileSwapRegionPart {
     HeightmapDestination = 3
 };
 
+GLCanvasObjectSupport::TileSwapRegionPart ToSupportTileSwapRegionPart(TileSwapRegionPart part)
+{
+    switch (part) {
+        case TileSwapRegionPart::TilemapSource:
+            return GLCanvasObjectSupport::TileSwapRegionPart::TilemapSource;
+        case TileSwapRegionPart::TilemapDestination:
+            return GLCanvasObjectSupport::TileSwapRegionPart::TilemapDestination;
+        case TileSwapRegionPart::HeightmapSource:
+            return GLCanvasObjectSupport::TileSwapRegionPart::HeightmapSource;
+        case TileSwapRegionPart::HeightmapDestination:
+            return GLCanvasObjectSupport::TileSwapRegionPart::HeightmapDestination;
+    }
+    return GLCanvasObjectSupport::TileSwapRegionPart::TilemapSource;
+}
+
+TileSwapRegionPart FromSupportTileSwapRegionPart(GLCanvasObjectSupport::TileSwapRegionPart part)
+{
+    switch (part) {
+        case GLCanvasObjectSupport::TileSwapRegionPart::TilemapSource:
+            return TileSwapRegionPart::TilemapSource;
+        case GLCanvasObjectSupport::TileSwapRegionPart::TilemapDestination:
+            return TileSwapRegionPart::TilemapDestination;
+        case GLCanvasObjectSupport::TileSwapRegionPart::HeightmapSource:
+            return TileSwapRegionPart::HeightmapSource;
+        case GLCanvasObjectSupport::TileSwapRegionPart::HeightmapDestination:
+            return TileSwapRegionPart::HeightmapDestination;
+    }
+    return TileSwapRegionPart::TilemapSource;
+}
+
 struct TileSwapRegionGeometry {
     int flat_index;
     int swap_index;
@@ -285,24 +317,10 @@ bool PointInRect(const PickPoint& point, const PickRect& rect)
            point.y <= rect.max_y;
 }
 
-PickRect TileSwapRegionResizeControlRect(const TileSwapRegionGeometry& region)
-{
-    return RectAroundPoint(region.resize_handle, 6.0f);
-}
-
 TileSwapRegionMetrics MetricsForTileSwapRegion(const TileSwap& swap, TileSwapRegionPart part)
 {
-    switch (part) {
-        case TileSwapRegionPart::TilemapSource:
-            return {swap.map.src_x, swap.map.src_y, swap.map.width, swap.map.height};
-        case TileSwapRegionPart::TilemapDestination:
-            return {swap.map.dst_x, swap.map.dst_y, swap.map.width, swap.map.height};
-        case TileSwapRegionPart::HeightmapSource:
-            return {swap.heightmap.src_x, swap.heightmap.src_y, swap.heightmap.width, swap.heightmap.height};
-        case TileSwapRegionPart::HeightmapDestination:
-            return {swap.heightmap.dst_x, swap.heightmap.dst_y, swap.heightmap.width, swap.heightmap.height};
-    }
-    return {0, 0, 1, 1};
+    auto metrics = GLCanvasObjectSupport::MetricsForTileSwapRegion(swap, ToSupportTileSwapRegionPart(part));
+    return {metrics.x, metrics.y, metrics.width, metrics.height};
 }
 
 PickPoint PolygonEdgeHandle(const std::vector<PickPoint>& points, int axis)
@@ -329,78 +347,19 @@ PickPoint PolygonEdgeHandle(const std::vector<PickPoint>& points, int axis)
     return best;
 }
 
-PickPoint TileSwapResizeHandlePoint(const std::vector<PickPoint>& points, TileSwap::Mode mode)
-{
-    if (points.empty()) {
-        return {0.0f, 0.0f};
-    }
-    if (mode == TileSwap::Mode::FLOOR) {
-        PickPoint best = points.front();
-        for (const auto& point : points) {
-            if (point.y > best.y || (point.y == best.y && point.x < best.x)) {
-                best = point;
-            }
-        }
-        return best;
-    }
-    PickRect bounds{
-        std::numeric_limits<float>::max(),
-        std::numeric_limits<float>::max(),
-        std::numeric_limits<float>::lowest(),
-        std::numeric_limits<float>::lowest()
-    };
-    for (const auto& point : points) {
-        bounds.min_x = std::min(bounds.min_x, point.x);
-        bounds.min_y = std::min(bounds.min_y, point.y);
-        bounds.max_x = std::max(bounds.max_x, point.x);
-        bounds.max_y = std::max(bounds.max_y, point.y);
-    }
-    PickPoint target = mode == TileSwap::Mode::WALL_NW
-        ? PickPoint{bounds.min_x, bounds.max_y}
-        : PickPoint{bounds.max_x, bounds.max_y};
-    PickPoint best = points.front();
-    float best_dist = std::numeric_limits<float>::max();
-    for (const auto& point : points) {
-        float dx = point.x - target.x;
-        float dy = point.y - target.y;
-        float dist = dx * dx + dy * dy;
-        if (dist < best_dist) {
-            best_dist = dist;
-            best = point;
-        }
-    }
-    return best;
-}
-
 float ValidWarpWidth(float requested_width, float current_height)
 {
-    if (std::round(current_height) > 1.0f) {
-        return 1.0f;
-    }
-    return std::clamp(std::round(requested_width), 1.0f, 3.0f);
+    return GLCanvasObjectSupport::ValidWarpWidth(requested_width, current_height);
 }
 
 float ValidWarpHeight(float requested_height, float current_width)
 {
-    if (std::round(current_width) > 1.0f) {
-        return 1.0f;
-    }
-    return std::clamp(std::round(requested_height), 1.0f, 3.0f);
+    return GLCanvasObjectSupport::ValidWarpHeight(requested_height, current_width);
 }
 
 void ClampWarpToValidSize(WarpInstance& warp)
 {
-    float rounded_width = std::clamp(std::round(warp.width), 1.0f, 3.0f);
-    float rounded_height = std::clamp(std::round(warp.height), 1.0f, 3.0f);
-    if (rounded_width > 1.0f && rounded_height > 1.0f) {
-        if (warp.width >= warp.height) {
-            rounded_height = 1.0f;
-        } else {
-            rounded_width = 1.0f;
-        }
-    }
-    warp.width = rounded_width;
-    warp.height = rounded_height;
+    GLCanvasObjectSupport::ClampWarpToValidSize(warp);
 }
 
 bool WarpResizeAxisUsable(const WarpInstance& warp, int axis)
@@ -486,21 +445,6 @@ PickRect BoundsForPoints(const std::vector<PickPoint>& points)
     return bounds;
 }
 
-const char* TileSwapPartLabel(TileSwapRegionPart part)
-{
-    switch (part) {
-        case TileSwapRegionPart::TilemapSource:
-            return "MAP SRC";
-        case TileSwapRegionPart::TilemapDestination:
-            return "MAP DST";
-        case TileSwapRegionPart::HeightmapSource:
-            return "HM SRC";
-        case TileSwapRegionPart::HeightmapDestination:
-            return "HM DST";
-    }
-    return "";
-}
-
 const char* TileSwapShapeLabel(TileSwap::Mode mode)
 {
     switch (mode) {
@@ -521,176 +465,33 @@ std::vector<TileSwapRegionGeometry> BuildTileSwapRegionGeometries(
     float z_extent)
 {
     std::vector<TileSwapRegionGeometry> out;
-    auto rd = gd ? gd->GetRoomData() : nullptr;
-    if (!rd) {
-        return out;
-    }
-    auto swaps = rd->GetTileSwaps(room);
-    if (swaps.empty()) {
-        return out;
-    }
-    auto map_entry = rd->GetMapForRoom(room);
-    auto tilemap = map_entry ? map_entry->GetData() : nullptr;
-    const float room_left = static_cast<float>(map_renderer.GetRoomLeft());
-    const float room_top = static_cast<float>(map_renderer.GetRoomTop());
-
-    auto add_region = [&](int swap_index, TileSwapRegionPart part, const TileSwap& swap, std::vector<PickPoint> points, bool segments = false) {
-        if (points.size() < 2) {
-            return;
+    auto shared = GLCanvasObjectSupport::BuildTileSwapRegionGeometries(gd, room, map_renderer, z_extent);
+    out.reserve(shared.size());
+    for (const auto& region : shared) {
+        TileSwapRegionGeometry local{};
+        local.flat_index = region.flat_index;
+        local.swap_index = region.swap_index;
+        local.part = FromSupportTileSwapRegionPart(region.part);
+        local.swap = region.swap;
+        local.points.reserve(region.points.size());
+        for (const auto& point : region.points) {
+            local.points.push_back({point.x, point.y});
         }
-        TileSwapRegionGeometry geom{};
-        geom.flat_index = static_cast<int>(out.size());
-        geom.swap_index = swap_index;
-        geom.part = part;
-        geom.swap = swap;
-        geom.points = std::move(points);
-        geom.fill_points = geom.points;
-        geom.bounds = BoundsForPoints(geom.points);
-        geom.segments = segments;
-        geom.resize_handle = TileSwapResizeHandlePoint(geom.points, swap.mode);
-        out.push_back(std::move(geom));
-    };
-
-    auto tilemap_points = [&](const TileSwap& swap, TileSwap::Region region) {
-        std::vector<PickPoint> points;
-        auto poly = swap.GetMapRegionPoly(TileSwap::Region::UNDEFINED, 1, 2);
-        auto tile_offset = swap.GetTileOffset(region, tilemap, Tilemap3D::Layer::BG);
-        PickPoint anchor = ProjectRoomGridPoint(
-            room_left + static_cast<float>(tile_offset.first),
-            room_top + static_cast<float>(tile_offset.second),
-            0.0f,
-            room_left,
-            room_top);
-        points.reserve(poly.size());
-        for (const auto& point : poly) {
-            points.push_back({
-                anchor.x + static_cast<float>(point.first) * 32.0f,
-                anchor.y + static_cast<float>(point.second) * 16.0f
-            });
+        local.fill_points.reserve(region.fill_points.size());
+        for (const auto& point : region.fill_points) {
+            local.fill_points.push_back({point.x, point.y});
         }
-        return points;
-    };
-
-    auto heightmap_region = [&](int swap_index, TileSwapRegionPart part, const TileSwap& swap, const TileSwap::CopyOp& op, bool source) {
-        if (!tilemap) {
-            return;
+        local.bounds = local.points.empty() ? PickRect{0.0f, 0.0f, 0.0f, 0.0f} : BoundsForPoints(local.points);
+        if (!local.fill_points.empty()) {
+            PickRect fill_bounds = BoundsForPoints(local.fill_points);
+            local.bounds.min_x = std::min(local.bounds.min_x, fill_bounds.min_x);
+            local.bounds.min_y = std::min(local.bounds.min_y, fill_bounds.min_y);
+            local.bounds.max_x = std::max(local.bounds.max_x, fill_bounds.max_x);
+            local.bounds.max_y = std::max(local.bounds.max_y, fill_bounds.max_y);
         }
-        int x0 = source ? op.src_x : op.dst_x;
-        int y0 = source ? op.src_y : op.dst_y;
-        int x1 = x0 + op.width;
-        int y1 = y0 + op.height;
-        std::vector<PickPoint> segments;
-        std::vector<PickPoint> x_handle_points;
-        std::vector<PickPoint> y_handle_points;
-        std::vector<PickPoint> left_handle_points;
-        auto in_region = [&](int x, int y) {
-            return x >= x0 && x < x1 && y >= y0 && y < y1;
-        };
-        auto height_at = [&](int x, int y) {
-            if (x < 0 || y < 0 || x >= tilemap->GetHeightmapWidth() || y >= tilemap->GetHeightmapHeight()) {
-                return 0.0f;
-            }
-            uint8_t z = tilemap->GetHeight({x, y});
-            return z == 0xFF ? 0.0f : static_cast<float>(z);
-        };
-        auto center = [&](int x, int y) {
-            return ProjectHeightmapGridPoint(
-                static_cast<float>(x) + 0.5f,
-                static_cast<float>(y) + 0.5f,
-                height_at(x, y),
-                room_left,
-                room_top,
-                z_extent);
-        };
-        auto offset = [](const PickPoint& point, float x, float y) {
-            return PickPoint{point.x + x, point.y + y};
-        };
-        auto visual_corner = [&](int x, int y, float ox, float oy) {
-            return offset(center(x, y), ox, oy);
-        };
-        std::vector<PickPoint> fill_points{
-            visual_corner(x0, y0, 0.0f, -16.0f),
-            visual_corner(x1 - 1, y0, 32.0f, 0.0f),
-            visual_corner(x1 - 1, y1 - 1, 0.0f, 16.0f),
-            visual_corner(x0, y1 - 1, -32.0f, 0.0f)
-        };
-        PickPoint visual_bottom_corner = fill_points[2];
-        auto add_segment = [&](const PickPoint& a, const PickPoint& b, bool x_handle, bool y_handle, bool left_handle) {
-            segments.push_back(a);
-            segments.push_back(b);
-            PickPoint midpoint{(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f};
-            if (x_handle) {
-                x_handle_points.push_back(midpoint);
-            }
-            if (y_handle) {
-                y_handle_points.push_back(midpoint);
-            }
-            if (left_handle) {
-                left_handle_points.push_back(midpoint);
-            }
-        };
-        for (int y = y0; y < y1; ++y) {
-            for (int x = x0; x < x1; ++x) {
-                PickPoint c = center(x, y);
-                PickPoint top = offset(c, 0.0f, -16.0f);
-                PickPoint right = offset(c, 32.0f, 0.0f);
-                PickPoint bottom = offset(c, 0.0f, 16.0f);
-                PickPoint left = offset(c, -32.0f, 0.0f);
-                if (!in_region(x, y - 1)) {
-                    add_segment(top, right, false, false, false);
-                }
-                if (!in_region(x + 1, y)) {
-                    add_segment(right, bottom, true, false, false);
-                }
-                if (!in_region(x, y + 1)) {
-                    add_segment(bottom, left, false, true, false);
-                }
-                if (!in_region(x - 1, y)) {
-                    add_segment(left, top, false, false, true);
-                }
-            }
-        }
-        if (segments.empty()) {
-            return;
-        }
-        TileSwapRegionGeometry geom{};
-        geom.flat_index = static_cast<int>(out.size());
-        geom.swap_index = swap_index;
-        geom.part = part;
-        geom.swap = swap;
-        geom.points = std::move(segments);
-        geom.fill_points = std::move(fill_points);
-        geom.bounds = BoundsForPoints(geom.points);
-        PickRect fill_bounds = BoundsForPoints(geom.fill_points);
-        geom.bounds.min_x = std::min(geom.bounds.min_x, fill_bounds.min_x);
-        geom.bounds.min_y = std::min(geom.bounds.min_y, fill_bounds.min_y);
-        geom.bounds.max_x = std::max(geom.bounds.max_x, fill_bounds.max_x);
-        geom.bounds.max_y = std::max(geom.bounds.max_y, fill_bounds.max_y);
-        geom.segments = true;
-        auto average = [](const std::vector<PickPoint>& points, PickPoint fallback) {
-            if (points.empty()) {
-                return fallback;
-            }
-            PickPoint out{0.0f, 0.0f};
-            for (const auto& point : points) {
-                out.x += point.x;
-                out.y += point.y;
-            }
-            out.x /= static_cast<float>(points.size());
-            out.y /= static_cast<float>(points.size());
-            return out;
-        };
-        (void)average;
-        geom.resize_handle = visual_bottom_corner;
-        out.push_back(std::move(geom));
-    };
-
-    for (std::size_t i = 0; i < swaps.size(); ++i) {
-        const TileSwap& swap = swaps[i];
-        add_region(static_cast<int>(i), TileSwapRegionPart::TilemapSource, swap, tilemap_points(swap, TileSwap::Region::SOURCE));
-        add_region(static_cast<int>(i), TileSwapRegionPart::TilemapDestination, swap, tilemap_points(swap, TileSwap::Region::DESTINATION));
-        heightmap_region(static_cast<int>(i), TileSwapRegionPart::HeightmapSource, swap, swap.heightmap, true);
-        heightmap_region(static_cast<int>(i), TileSwapRegionPart::HeightmapDestination, swap, swap.heightmap, false);
+        local.segments = region.segments;
+        local.resize_handle = {region.resize_handle.x, region.resize_handle.y};
+        out.push_back(std::move(local));
     }
     return out;
 }
@@ -1051,20 +852,15 @@ WarpInstance MakeWarpInstance(
     uint32_t warp_key = 0,
     int side_override = 0)
 {
-    bool current_room_is_room1 = side_override == 0 ? warp.room1 == current_room : side_override == 1;
-    WarpInstance inst{};
-    inst.instance_id = instance_id;
-    inst.warp_key = warp_key != 0 ? warp_key : instance_id;
-    inst.warp = warp;
-    inst.current_room_is_room1 = current_room_is_room1;
-    inst.x = float(current_room_is_room1 ? warp.x1 : warp.x2);
-    inst.y = float(current_room_is_room1 ? warp.y1 : warp.y2);
-    inst.width = float(std::max<uint8_t>(warp.x_size, 1));
-    inst.height = float(std::max<uint8_t>(warp.y_size, 1));
-    inst.z_extent = z_extent;
-    inst.room_left = room_left;
-    inst.room_top = room_top;
-    return inst;
+    return GLCanvasObjectSupport::MakeWarpInstance(
+        warp,
+        current_room,
+        instance_id,
+        room_left,
+        room_top,
+        z_extent,
+        warp_key,
+        side_override);
 }
 
 bool EntityDrawOrder(const SpriteInstance& lhs, const SpriteInstance& rhs) {
@@ -1124,56 +920,7 @@ bool EntityMustDrawBefore(const SpriteInstance& lhs, const SpriteInstance& rhs) 
 }
 
 void SortEntitiesGeometrically(std::vector<SpriteInstance>& instances) {
-    std::stable_sort(instances.begin(), instances.end(), EntityDrawOrder);
-
-    const std::size_t count = instances.size();
-    std::vector<std::vector<std::size_t>> after(count);
-    std::vector<std::size_t> incoming(count, 0);
-    for (std::size_t i = 0; i < count; ++i) {
-        for (std::size_t j = i + 1; j < count; ++j) {
-            bool i_before_j = EntityMustDrawBefore(instances[i], instances[j]);
-            bool j_before_i = EntityMustDrawBefore(instances[j], instances[i]);
-            if (i_before_j == j_before_i) {
-                continue;
-            }
-            std::size_t before = i_before_j ? i : j;
-            std::size_t later = i_before_j ? j : i;
-            after[before].push_back(later);
-            ++incoming[later];
-        }
-    }
-
-    std::deque<std::size_t> ready;
-    for (std::size_t i = 0; i < count; ++i) {
-        if (incoming[i] == 0) {
-            ready.push_back(i);
-        }
-    }
-
-    std::vector<SpriteInstance> sorted;
-    sorted.reserve(count);
-    std::vector<bool> emitted(count, false);
-    while (!ready.empty()) {
-        std::size_t index = ready.front();
-        ready.pop_front();
-        if (emitted[index]) {
-            continue;
-        }
-        emitted[index] = true;
-        sorted.push_back(instances[index]);
-        for (std::size_t later : after[index]) {
-            if (--incoming[later] == 0) {
-                ready.push_back(later);
-            }
-        }
-    }
-
-    for (std::size_t i = 0; i < count; ++i) {
-        if (!emitted[i]) {
-            sorted.push_back(instances[i]);
-        }
-    }
-    instances = std::move(sorted);
+    GLCanvasObjectSupport::SortEntitiesGeometrically(instances);
 }
 
 std::set<uint32_t> FindCollidedEntities(const std::vector<SpriteInstance>& instances) {
@@ -1201,6 +948,8 @@ std::set<uint32_t> FindCollidedEntities(const std::vector<SpriteInstance>& insta
 
 void DrawStencilOverlay(float cam_x, float cam_y, int width, int height, GLint ref, GLint mask, float r, float g, float b, float a)
 {
+    // Draw a fullscreen tint only where the stencil test passes.
+    // We lock stencil writes (mask 0x00) so this pass only reads stencil state.
     glUseProgram(0);
     for (int i = 0; i <= 5; ++i) {
         glActiveTexture(GL_TEXTURE0 + i);
@@ -1259,6 +1008,11 @@ void DrawOverlayText(const std::string& text, float x, float y, float scale)
     }
 }
 }
+
+#include "GLCanvasEntityEditor.h"
+#include "GLCanvasWarpEditor.h"
+#include "GLCanvasTileDoorEditor.h"
+#include "GLCanvasObjectCoordinator.h"
 
 wxBEGIN_EVENT_TABLE(MyGLCanvas, wxGLCanvas)
     EVT_PAINT(MyGLCanvas::OnPaint)
@@ -1874,6 +1628,8 @@ void MyGLCanvas::OnMouseMove(wxMouseEvent& evt) {
         ScreenToWorldX(evt.GetPosition().x),
         ScreenToWorldY(evt.GetPosition().y));
 
+    // Hit-tests run from most specific controls to broadest objects.
+    // This precedence avoids selecting underlying objects when a resize/z handle is on top.
     int hovered_control = HitTestEntityZControl(evt.GetPosition());
     int hovered_body = hovered_control >= 0 ? hovered_control : HitTestEntityBody(evt.GetPosition());
     int hovered_warp_resize = hovered_body < 0 ? HitTestWarpResizeControl(evt.GetPosition()) : 0;
@@ -1923,6 +1679,8 @@ void MyGLCanvas::OnLeftDown(wxMouseEvent& evt) {
         return;
     }
 
+    // Selection order mirrors hover order: control handles first, then object bodies,
+    // and finally canvas panning when nothing interactive is under the cursor.
     int control_idx = HitTestEntityZControl(evt.GetPosition());
     m_selected_entity_idx = control_idx >= 0 ? control_idx : HitTestEntityBody(evt.GetPosition());
     if (m_selected_entity_idx >= 0) {
@@ -2853,110 +2611,19 @@ void MyGLCanvas::PersistCurrentRoomEdits() {
     m_gd->GetRoomData()->SetWarpsForRoom(m_current_room, warps);
 }
 
+
+// Thin forwarding layer: input handlers stay on MyGLCanvas while edit rules
+// live in dedicated editor/coordinator classes.
 void MyGLCanvas::AddEntity() {
-    if (m_room_entities.size() >= 15) {
-        return;
-    }
-
-    Landstalker::Entity entity;
-    float x = float(m_mapRenderer.GetRoomLeft()) + float(m_mapRenderer.GetRoomWidth()) * 0.5f;
-    float y = float(m_mapRenderer.GetRoomTop()) + float(m_mapRenderer.GetRoomHeight()) * 0.5f;
-    entity.SetXDbl(std::clamp<double>(x, 0.5, 63.5));
-    entity.SetYDbl(std::clamp<double>(y, 0.5, 63.5));
-    entity.SetZDbl(FloorUnderPoint(float(entity.GetXDbl()), float(entity.GetYDbl())));
-    m_room_entities.push_back(entity);
-
-    SpriteInstance inst{};
-    inst.instance_id = static_cast<uint32_t>(m_room_entities.size());
-    inst.entity_id = entity.GetType();
-    inst.palette = entity.GetPalette();
-    inst.map_x = float(entity.GetXDbl());
-    inst.map_y = float(entity.GetYDbl());
-    inst.map_z = float(entity.GetZDbl());
-    inst.z_extent = m_heightmapRenderer.GetZExtent();
-    inst.room_left = float(m_mapRenderer.GetRoomLeft());
-    inst.room_top = float(m_mapRenderer.GetRoomTop());
-    inst.dx = 0.0f;
-    inst.dy = 0.0f;
-    inst.scale = 2.0f;
-    inst.anim_timer = 0.0f;
-    inst.anim_speed = 1.0f;
-    inst.orientation = entity.GetOrientation();
-    RefreshEntityMetadata(inst);
-    m_instances.push_back(inst);
-    SortEntitiesGeometrically(m_instances);
-    m_selected_entity_idx = FindInstanceIndex(inst.instance_id);
-    m_selected_warp_idx = -1;
+    GLCanvasEntityEditor(*this).AddEntity();
 }
 
 void MyGLCanvas::CopySelectedEntity() {
-    if (m_selected_entity_idx < 0 || m_selected_entity_idx >= static_cast<int>(m_instances.size())) {
-        return;
-    }
-
-    const SpriteInstance& inst = m_instances[static_cast<std::size_t>(m_selected_entity_idx)];
-    std::size_t slot = inst.instance_id > 0 ? std::size_t(inst.instance_id - 1) : m_room_entities.size();
-    Landstalker::Entity entity = slot < m_room_entities.size() ? m_room_entities[slot] : Landstalker::Entity{};
-    entity.SetType(inst.entity_id);
-    entity.SetPalette(std::min<uint8_t>(inst.palette, 3));
-    entity.SetOrientation(inst.orientation);
-    entity.SetXDbl(inst.map_x);
-    entity.SetYDbl(inst.map_y);
-    entity.SetZDbl(inst.map_z);
-    m_entity_clipboard = entity;
-    m_entity_clipboard_valid = true;
+    GLCanvasEntityEditor(*this).CopySelectedEntity();
 }
 
 void MyGLCanvas::PasteEntity() {
-    if (!m_entity_clipboard_valid || m_room_entities.size() >= 15) {
-        return;
-    }
-
-    Landstalker::Entity entity = m_entity_clipboard;
-    auto occupied = [this](double x, double y) {
-        for (const auto& inst : m_instances) {
-            if (std::abs(double(inst.map_x) - x) < 0.25 && std::abs(double(inst.map_y) - y) < 0.25) {
-                return true;
-            }
-        }
-        return false;
-    };
-    double x = std::clamp<double>(entity.GetXDbl() + 1.0, 0.5, 63.5);
-    double y = std::clamp<double>(entity.GetYDbl(), 0.5, 63.5);
-    for (int tries = 0; tries < 128 && occupied(x, y); ++tries) {
-        x += 1.0;
-        if (x > 63.5) {
-            x = 0.5;
-            y = std::clamp<double>(y + 1.0, 0.5, 63.5);
-        }
-    }
-    entity.SetXDbl(x);
-    entity.SetYDbl(y);
-    m_room_entities.push_back(entity);
-
-    SpriteInstance inst{};
-    inst.instance_id = static_cast<uint32_t>(m_room_entities.size());
-    inst.entity_id = entity.GetType();
-    inst.palette = entity.GetPalette();
-    inst.map_x = float(entity.GetXDbl());
-    inst.map_y = float(entity.GetYDbl());
-    inst.map_z = std::clamp(float(entity.GetZDbl()), 0.0f, 15.5f);
-    inst.z_extent = m_heightmapRenderer.GetZExtent();
-    inst.room_left = float(m_mapRenderer.GetRoomLeft());
-    inst.room_top = float(m_mapRenderer.GetRoomTop());
-    inst.dx = 0.0f;
-    inst.dy = 0.0f;
-    inst.scale = 2.0f;
-    inst.anim_timer = 0.0f;
-    inst.anim_speed = 1.0f;
-    inst.orientation = entity.GetOrientation();
-    RefreshEntityMetadata(inst);
-    m_instances.push_back(inst);
-    SortEntitiesGeometrically(m_instances);
-    m_selected_entity_idx = FindInstanceIndex(inst.instance_id);
-    m_hovered_entity_idx = m_selected_entity_idx;
-    m_selected_warp_idx = -1;
-    m_hovered_warp_idx = -1;
+    GLCanvasEntityEditor(*this).PasteEntity();
 }
 
 void MyGLCanvas::CutSelectedEntity() {
@@ -2969,541 +2636,43 @@ void MyGLCanvas::CutSelectedEntity() {
 }
 
 void MyGLCanvas::DeleteSelectedObject() {
-    if (m_selected_entity_idx >= 0 && m_selected_entity_idx < static_cast<int>(m_instances.size())) {
-        uint32_t id = m_instances[static_cast<std::size_t>(m_selected_entity_idx)].instance_id;
-        std::size_t slot = id > 0 ? std::size_t(id - 1) : m_room_entities.size();
-        if (slot < m_room_entities.size()) {
-            m_room_entities.erase(m_room_entities.begin() + static_cast<std::ptrdiff_t>(slot));
-        }
-        m_instances.erase(m_instances.begin() + m_selected_entity_idx);
-        for (auto& inst : m_instances) {
-            if (inst.instance_id > id) {
-                --inst.instance_id;
-            }
-        }
-        m_selected_entity_idx = -1;
-        m_hovered_entity_idx = -1;
-        return;
-    }
-
-    if (m_selected_warp_idx >= 0 && m_selected_warp_idx < static_cast<int>(m_warps.size())) {
-        const WarpInstance& selected = m_warps[static_cast<std::size_t>(m_selected_warp_idx)];
-        if (m_pending_warp_half &&
-            m_current_room == m_pending_warp_room &&
-            selected.instance_id == m_pending_warp_instance_id &&
-            selected.DestinationRoom() == 0xFFFF) {
-            m_pending_warp_half = false;
-            m_pending_warp_room = 0xFFFF;
-            m_pending_warp_instance_id = 0;
-        }
-        m_warps.erase(m_warps.begin() + m_selected_warp_idx);
-        for (std::size_t i = 0; i < m_warps.size(); ++i) {
-            m_warps[i].instance_id = static_cast<uint32_t>(i + 1);
-        }
-        m_selected_warp_idx = -1;
-        m_hovered_warp_idx = -1;
-        return;
-    }
-
-    if (m_selected_tileswap_region_idx >= 0) {
-        ClearTileSwapPreview();
-        auto regions = BuildTileSwapRegionGeometries(m_gd, m_current_room, m_mapRenderer, m_heightmapRenderer.GetZExtent());
-        if (m_selected_tileswap_region_idx >= static_cast<int>(regions.size())) {
-            m_selected_tileswap_region_idx = -1;
-            m_hovered_tileswap_region_idx = -1;
-            return;
-        }
-        int swap_index = regions[static_cast<std::size_t>(m_selected_tileswap_region_idx)].swap_index;
-        auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-        if (!rd) {
-            return;
-        }
-        auto swaps = rd->GetTileSwaps(m_current_room);
-        if (swap_index >= 0 && swap_index < static_cast<int>(swaps.size())) {
-            swaps.erase(swaps.begin() + swap_index);
-            rd->SetTileSwaps(m_current_room, swaps);
-        }
-        m_selected_tileswap_region_idx = -1;
-        m_hovered_tileswap_region_idx = -1;
-        return;
-    }
-
-    if (m_selected_door_idx >= 0) {
-        ClearTileSwapPreview();
-        auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-        if (!rd) {
-            return;
-        }
-        auto doors = rd->GetDoors(m_current_room);
-        if (m_selected_door_idx >= 0 && m_selected_door_idx < static_cast<int>(doors.size())) {
-            doors.erase(doors.begin() + m_selected_door_idx);
-            rd->SetDoors(m_current_room, doors);
-        }
-        m_selected_door_idx = -1;
-        m_hovered_door_idx = -1;
-    }
+    GLCanvasObjectCoordinator(*this).DeleteSelectedObject();
 }
 
 void MyGLCanvas::ReorderSelectedObject(int delta) {
-    if (m_selected_entity_idx >= 0 && m_selected_entity_idx < static_cast<int>(m_instances.size())) {
-        uint32_t id = m_instances[static_cast<std::size_t>(m_selected_entity_idx)].instance_id;
-        int slot = static_cast<int>(id) - 1;
-        int new_slot = std::clamp(slot + delta, 0, static_cast<int>(m_room_entities.size()) - 1);
-        if (new_slot == slot) {
-            return;
-        }
-        std::swap(m_room_entities[static_cast<std::size_t>(slot)], m_room_entities[static_cast<std::size_t>(new_slot)]);
-        for (auto& inst : m_instances) {
-            if (inst.instance_id == static_cast<uint32_t>(slot + 1)) {
-                inst.instance_id = static_cast<uint32_t>(new_slot + 1);
-            } else if (inst.instance_id == static_cast<uint32_t>(new_slot + 1)) {
-                inst.instance_id = static_cast<uint32_t>(slot + 1);
-            }
-        }
-        m_selected_entity_idx = FindInstanceIndex(static_cast<uint32_t>(new_slot + 1));
-        return;
-    }
-
-    if (m_selected_warp_idx >= 0 && m_selected_warp_idx < static_cast<int>(m_warps.size())) {
-        int new_idx = std::clamp(m_selected_warp_idx + delta, 0, static_cast<int>(m_warps.size()) - 1);
-        if (new_idx != m_selected_warp_idx) {
-            std::swap(m_warps[static_cast<std::size_t>(m_selected_warp_idx)], m_warps[static_cast<std::size_t>(new_idx)]);
-            m_selected_warp_idx = new_idx;
-        }
-        return;
-    }
-
-    if (m_selected_door_idx >= 0) {
-        auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-        if (!rd) {
-            return;
-        }
-        auto doors = rd->GetDoors(m_current_room);
-        if (m_selected_door_idx >= static_cast<int>(doors.size())) {
-            m_selected_door_idx = -1;
-            m_hovered_door_idx = -1;
-            return;
-        }
-        int new_idx = std::clamp(m_selected_door_idx + delta, 0, static_cast<int>(doors.size()) - 1);
-        if (new_idx != m_selected_door_idx) {
-            std::swap(doors[static_cast<std::size_t>(m_selected_door_idx)], doors[static_cast<std::size_t>(new_idx)]);
-            rd->SetDoors(m_current_room, doors);
-            m_selected_door_idx = new_idx;
-            m_hovered_door_idx = new_idx;
-        }
-    }
+    GLCanvasObjectCoordinator(*this).ReorderSelectedObject(delta);
 }
 
 void MyGLCanvas::SelectNextObject(int direction) {
-    enum class SelectionType {
-        Entity,
-        Warp,
-        TileSwapRegion,
-        Door
-    };
-
-    struct TabEntry {
-        SelectionType type;
-        int index;
-        int id;
-        int part_order;
-    };
-
-    auto region_part_order = [](TileSwapRegionPart part) {
-        switch (part) {
-            case TileSwapRegionPart::TilemapSource: return 0;
-            case TileSwapRegionPart::TilemapDestination: return 1;
-            case TileSwapRegionPart::HeightmapSource: return 2;
-            case TileSwapRegionPart::HeightmapDestination: return 3;
-        }
-        return 4;
-    };
-
-    auto type_order = [](SelectionType type) {
-        switch (type) {
-            case SelectionType::Entity: return 0;
-            case SelectionType::Warp: return 1;
-            case SelectionType::TileSwapRegion: return 2;
-            case SelectionType::Door: return 3;
-        }
-        return 4;
-    };
-
-    std::vector<TabEntry> order;
-    order.reserve(m_instances.size() + m_warps.size());
-
-    for (const auto& inst : m_instances) {
-        order.push_back({
-            SelectionType::Entity,
-            static_cast<int>(inst.instance_id),
-            static_cast<int>(inst.instance_id),
-            0
-        });
-    }
-
-    for (const auto& warp : m_warps) {
-        order.push_back({
-            SelectionType::Warp,
-            static_cast<int>(warp.instance_id),
-            static_cast<int>(warp.instance_id),
-            0
-        });
-    }
-
-    auto regions = BuildTileSwapRegionGeometries(m_gd, m_current_room, m_mapRenderer, m_heightmapRenderer.GetZExtent());
-    auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-    std::vector<TileSwap> swaps = rd ? rd->GetTileSwaps(m_current_room) : std::vector<TileSwap>{};
-    for (const auto& region : regions) {
-        if (region.swap_index < 0 || region.swap_index >= static_cast<int>(swaps.size())) {
-            continue;
-        }
-        const TileSwap& swap = swaps[static_cast<std::size_t>(region.swap_index)];
-        order.push_back({
-            SelectionType::TileSwapRegion,
-            region.flat_index,
-            static_cast<int>(swap.trigger),
-            region_part_order(region.part)
-        });
-    }
-
-    if (rd) {
-        auto doors = rd->GetDoors(m_current_room);
-        for (int i = 0; i < static_cast<int>(doors.size()); ++i) {
-            order.push_back({SelectionType::Door, i, i + 1, 0});
-        }
-    }
-
-    if (order.empty()) {
-        m_selected_entity_idx = -1;
-        m_selected_warp_idx = -1;
-        m_selected_tileswap_region_idx = -1;
-        m_selected_door_idx = -1;
-        return;
-    }
-
-    std::stable_sort(order.begin(), order.end(), [&](const TabEntry& lhs, const TabEntry& rhs) {
-        int lhs_type = type_order(lhs.type);
-        int rhs_type = type_order(rhs.type);
-        if (lhs_type != rhs_type) {
-            return lhs_type < rhs_type;
-        }
-        if (lhs.id != rhs.id) {
-            return lhs.id < rhs.id;
-        }
-        if (lhs.part_order != rhs.part_order) {
-            return lhs.part_order < rhs.part_order;
-        }
-        return lhs.index < rhs.index;
-    });
-
-    int current = -1;
-    if (m_selected_entity_idx >= 0 && m_selected_entity_idx < static_cast<int>(m_instances.size())) {
-        int selected_id = static_cast<int>(m_instances[static_cast<std::size_t>(m_selected_entity_idx)].instance_id);
-        for (int i = 0; i < static_cast<int>(order.size()); ++i) {
-            if (order[static_cast<std::size_t>(i)].type == SelectionType::Entity &&
-                order[static_cast<std::size_t>(i)].id == selected_id) {
-                current = i;
-                break;
-            }
-        }
-    } else if (m_selected_warp_idx >= 0 && m_selected_warp_idx < static_cast<int>(m_warps.size())) {
-        int selected_id = static_cast<int>(m_warps[static_cast<std::size_t>(m_selected_warp_idx)].instance_id);
-        for (int i = 0; i < static_cast<int>(order.size()); ++i) {
-            if (order[static_cast<std::size_t>(i)].type == SelectionType::Warp &&
-                order[static_cast<std::size_t>(i)].id == selected_id) {
-                current = i;
-                break;
-            }
-        }
-    } else if (m_selected_tileswap_region_idx >= 0) {
-        for (int i = 0; i < static_cast<int>(order.size()); ++i) {
-            if (order[static_cast<std::size_t>(i)].type == SelectionType::TileSwapRegion &&
-                order[static_cast<std::size_t>(i)].index == m_selected_tileswap_region_idx) {
-                current = i;
-                break;
-            }
-        }
-    } else if (m_selected_door_idx >= 0) {
-        for (int i = 0; i < static_cast<int>(order.size()); ++i) {
-            if (order[static_cast<std::size_t>(i)].type == SelectionType::Door &&
-                order[static_cast<std::size_t>(i)].index == m_selected_door_idx) {
-                current = i;
-                break;
-            }
-        }
-    }
-
-    int step = direction >= 0 ? 1 : -1;
-    int next = -1;
-    if (current < 0) {
-        next = step > 0 ? 0 : static_cast<int>(order.size()) - 1;
-    } else {
-        next = (current + step + static_cast<int>(order.size())) % static_cast<int>(order.size());
-    }
-
-    const TabEntry& target = order[static_cast<std::size_t>(next)];
-    if (target.type == SelectionType::Entity) {
-        m_selected_entity_idx = FindInstanceIndex(static_cast<uint32_t>(target.id));
-        m_hovered_entity_idx = m_selected_entity_idx;
-        m_selected_warp_idx = -1;
-        m_hovered_warp_idx = -1;
-        m_selected_tileswap_region_idx = -1;
-        m_hovered_tileswap_region_idx = -1;
-        m_selected_door_idx = -1;
-        m_hovered_door_idx = -1;
-    } else if (target.type == SelectionType::Warp) {
-        m_selected_entity_idx = -1;
-        m_hovered_entity_idx = -1;
-        m_selected_warp_idx = FindWarpIndex(static_cast<uint32_t>(target.id));
-        m_hovered_warp_idx = m_selected_warp_idx;
-        m_selected_tileswap_region_idx = -1;
-        m_hovered_tileswap_region_idx = -1;
-        m_selected_door_idx = -1;
-        m_hovered_door_idx = -1;
-    } else if (target.type == SelectionType::TileSwapRegion) {
-        m_selected_entity_idx = -1;
-        m_hovered_entity_idx = -1;
-        m_selected_warp_idx = -1;
-        m_hovered_warp_idx = -1;
-        m_selected_tileswap_region_idx = target.index;
-        m_hovered_tileswap_region_idx = m_selected_tileswap_region_idx;
-        m_selected_door_idx = -1;
-        m_hovered_door_idx = -1;
-    } else {
-        m_selected_entity_idx = -1;
-        m_hovered_entity_idx = -1;
-        m_selected_warp_idx = -1;
-        m_hovered_warp_idx = -1;
-        m_selected_tileswap_region_idx = -1;
-        m_hovered_tileswap_region_idx = -1;
-        m_selected_door_idx = target.index;
-        m_hovered_door_idx = target.index;
-    }
-
-    FocusCameraOnSelectedObjectIfNeeded();
+    GLCanvasObjectCoordinator(*this).SelectNextObject(direction);
 }
 
 void MyGLCanvas::SelectNextTileSwapRegion(int direction) {
-    auto regions = BuildTileSwapRegionGeometries(m_gd, m_current_room, m_mapRenderer, m_heightmapRenderer.GetZExtent());
-    if (regions.empty()) {
-        m_selected_tileswap_region_idx = -1;
-        return;
-    }
-    int current = m_selected_tileswap_region_idx >= 0 ? m_selected_tileswap_region_idx : -1;
-    int next = (current + direction) % static_cast<int>(regions.size());
-    if (next < 0) {
-        next += static_cast<int>(regions.size());
-    }
-    m_selected_entity_idx = -1;
-    m_hovered_entity_idx = -1;
-    m_selected_warp_idx = -1;
-    m_hovered_warp_idx = -1;
-    m_selected_tileswap_region_idx = next;
-    m_hovered_tileswap_region_idx = next;
+    GLCanvasObjectCoordinator(*this).SelectNextTileSwapRegion(direction);
 }
 
 void MyGLCanvas::CycleSelectedEntityId(int delta) {
-    if (m_selected_entity_idx < 0 || m_selected_entity_idx >= static_cast<int>(m_instances.size())) {
-        return;
-    }
-    SpriteInstance& inst = m_instances[static_cast<std::size_t>(m_selected_entity_idx)];
-    inst.entity_id = static_cast<uint8_t>((int(inst.entity_id) + delta + 256) & 0xFF);
-    RefreshEntityMetadata(inst);
+    GLCanvasEntityEditor(*this).CycleSelectedEntityId(delta);
 }
 
 void MyGLCanvas::CycleSelectedEntityPalette() {
-    if (m_selected_entity_idx < 0 || m_selected_entity_idx >= static_cast<int>(m_instances.size())) {
-        return;
-    }
-    SpriteInstance& inst = m_instances[static_cast<std::size_t>(m_selected_entity_idx)];
-    inst.palette = static_cast<uint8_t>((inst.palette + 1) % 4);
+    GLCanvasEntityEditor(*this).CycleSelectedEntityPalette();
 }
 
 void MyGLCanvas::SetSelectedEntityOrientation(Landstalker::Orientation orientation) {
-    if (m_selected_entity_idx < 0 || m_selected_entity_idx >= static_cast<int>(m_instances.size())) {
-        return;
-    }
-    m_instances[static_cast<std::size_t>(m_selected_entity_idx)].orientation = orientation;
+    GLCanvasEntityEditor(*this).SetSelectedEntityOrientation(orientation);
 }
 
 void MyGLCanvas::SetSelectedEntityToFloor() {
-    if (m_selected_entity_idx < 0 || m_selected_entity_idx >= static_cast<int>(m_instances.size())) {
-        return;
-    }
-    SpriteInstance& inst = m_instances[static_cast<std::size_t>(m_selected_entity_idx)];
-    inst.floor_z = FloorUnderHitbox(inst.map_x + inst.hitbox_offset, inst.map_y + inst.hitbox_offset, inst.hitbox_base * 0.5f);
-    inst.map_z = std::clamp(inst.floor_z, 0.0f, 15.5f);
-    UpdateEntityProjection(inst);
+    GLCanvasEntityEditor(*this).SetSelectedEntityToFloor();
 }
 
 void MyGLCanvas::AddWarpHalf() {
-    Landstalker::WarpList::Warp warp;
-    auto [preferred_x, preferred_y] = MouseHeightmapCell();
-    auto [x, y] = FindNearestFreeWarpCell(static_cast<float>(preferred_x), static_cast<float>(preferred_y));
-    bool update_pending_instance = false;
-    if (!m_pending_warp_half) {
-        warp.room1 = m_current_room;
-        warp.x1 = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::round(x)), 0, 63));
-        warp.y1 = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::round(y)), 0, 63));
-        warp.room2 = 0xFFFF;
-        m_pending_warp = warp;
-        m_pending_warp_half = true;
-        m_pending_warp_room = m_current_room;
-        m_pending_warp_instance_id = static_cast<uint32_t>(m_warps.size() + 1);
-    } else {
-        if (m_pending_warp_room == m_current_room && m_pending_warp_instance_id != 0) {
-            int pending_idx = FindWarpIndex(m_pending_warp_instance_id);
-            if (pending_idx >= 0) {
-                const WarpInstance& pending = m_warps[static_cast<std::size_t>(pending_idx)];
-                m_pending_warp.x1 = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::round(pending.x)), 0, 63));
-                m_pending_warp.y1 = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::round(pending.y)), 0, 63));
-                m_pending_warp.x_size = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::round(pending.width)), 1, 63));
-                m_pending_warp.y_size = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::round(pending.height)), 1, 63));
-                m_pending_warp.type = pending.warp.type;
-            }
-        }
-        warp = m_pending_warp;
-        warp.room2 = m_current_room;
-        warp.x2 = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::round(x)), 0, 63));
-        warp.y2 = static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::round(y)), 0, 63));
-        update_pending_instance = m_pending_warp_room == m_current_room;
-        m_pending_warp_half = false;
-        m_pending_warp_room = 0xFFFF;
-    }
-
-    if (update_pending_instance) {
-        int pending_idx = FindWarpIndex(m_pending_warp_instance_id);
-        if (pending_idx < 0) {
-            for (std::size_t i = 0; i < m_warps.size(); ++i) {
-                const WarpInstance& candidate = m_warps[i];
-                if (candidate.current_room_is_room1 &&
-                    candidate.warp.room1 == warp.room1 &&
-                    candidate.warp.room2 == 0xFFFF &&
-                    candidate.warp.x1 == warp.x1 &&
-                    candidate.warp.y1 == warp.y1) {
-                    pending_idx = static_cast<int>(i);
-                    break;
-                }
-            }
-        }
-        uint32_t key = m_pending_warp_instance_id;
-        if (pending_idx >= 0) {
-            key = m_warps[static_cast<std::size_t>(pending_idx)].warp_key;
-            WarpInstance first_inst = MakeWarpInstance(
-                warp,
-                m_current_room,
-                m_warps[static_cast<std::size_t>(pending_idx)].instance_id,
-                float(m_mapRenderer.GetRoomLeft()),
-                float(m_mapRenderer.GetRoomTop()),
-                m_heightmapRenderer.GetZExtent(),
-                key,
-                1);
-            UpdateWarpFloor(first_inst);
-            m_warps[static_cast<std::size_t>(pending_idx)] = first_inst;
-        } else {
-            WarpInstance first_inst = MakeWarpInstance(
-                warp,
-                m_current_room,
-                static_cast<uint32_t>(m_warps.size() + 1),
-                float(m_mapRenderer.GetRoomLeft()),
-                float(m_mapRenderer.GetRoomTop()),
-                m_heightmapRenderer.GetZExtent(),
-                key,
-                1);
-            UpdateWarpFloor(first_inst);
-            m_warps.push_back(first_inst);
-        }
-        WarpInstance second_inst = MakeWarpInstance(
-            warp,
-            m_current_room,
-            static_cast<uint32_t>(m_warps.size() + 1),
-            float(m_mapRenderer.GetRoomLeft()),
-            float(m_mapRenderer.GetRoomTop()),
-            m_heightmapRenderer.GetZExtent(),
-            key,
-            2);
-        UpdateWarpFloor(second_inst);
-        m_warps.push_back(second_inst);
-        m_selected_warp_idx = static_cast<int>(m_warps.size()) - 1;
-    } else {
-        WarpInstance inst = MakeWarpInstance(
-            warp,
-            m_current_room,
-            static_cast<uint32_t>(m_warps.size() + 1),
-            float(m_mapRenderer.GetRoomLeft()),
-            float(m_mapRenderer.GetRoomTop()),
-            m_heightmapRenderer.GetZExtent());
-        UpdateWarpFloor(inst);
-        m_warps.push_back(inst);
-        m_selected_warp_idx = static_cast<int>(m_warps.size()) - 1;
-    }
-    if (warp.IsValid()) {
-        for (std::size_t i = 0; i < m_warps.size(); ) {
-            const WarpInstance& candidate = m_warps[i];
-            if (static_cast<int>(i) != m_selected_warp_idx &&
-                candidate.warp.room1 == warp.room1 &&
-                candidate.warp.room2 == 0xFFFF &&
-                candidate.warp.x1 == warp.x1 &&
-                candidate.warp.y1 == warp.y1) {
-                m_warps.erase(m_warps.begin() + static_cast<std::ptrdiff_t>(i));
-                if (m_selected_warp_idx > static_cast<int>(i)) {
-                    --m_selected_warp_idx;
-                }
-                continue;
-            }
-            ++i;
-        }
-        for (std::size_t i = 0; i < m_warps.size(); ++i) {
-            m_warps[i].instance_id = static_cast<uint32_t>(i + 1);
-        }
-    }
-    if (!m_pending_warp_half) {
-        m_pending_warp_instance_id = 0;
-        if (warp.IsValid()) {
-            PersistCurrentRoomEdits();
-        }
-    }
-    m_selected_entity_idx = -1;
+    GLCanvasWarpEditor(*this).AddWarpHalf();
 }
 
 std::pair<float, float> MyGLCanvas::FindNearestFreeWarpCell(float preferred_x, float preferred_y) const {
-    int start_x = std::clamp(static_cast<int>(std::round(preferred_x)), 0, 63);
-    int start_y = std::clamp(static_cast<int>(std::round(preferred_y)), 0, 63);
-
-    auto cell_free = [this](int x, int y) {
-        float fx = static_cast<float>(x);
-        float fy = static_cast<float>(y);
-        for (const auto& warp : m_warps) {
-            if (fx < warp.x + warp.width &&
-                fx + 1.0f > warp.x &&
-                fy < warp.y + warp.height &&
-                fy + 1.0f > warp.y) {
-                return false;
-            }
-        }
-        return true;
-    };
-
-    int best_x = start_x;
-    int best_y = start_y;
-    int best_dist = std::numeric_limits<int>::max();
-    for (int y = 0; y <= 63; ++y) {
-        for (int x = 0; x <= 63; ++x) {
-            if (!cell_free(x, y)) {
-                continue;
-            }
-            int dx = x - start_x;
-            int dy = y - start_y;
-            int dist = dx * dx + dy * dy;
-            if (dist < best_dist) {
-                best_dist = dist;
-                best_x = x;
-                best_y = y;
-            }
-        }
-    }
-
-    return {static_cast<float>(best_x), static_cast<float>(best_y)};
+    return GLCanvasWarpEditor(const_cast<MyGLCanvas&>(*this)).FindNearestFreeWarpCell(preferred_x, preferred_y);
 }
 
 std::pair<int, int> MyGLCanvas::MouseHeightmapCell() const {
@@ -3525,607 +2694,59 @@ std::pair<int, int> MyGLCanvas::MouseHeightmapCell() const {
 }
 
 void MyGLCanvas::ResizeSelectedWarp(float dx, float dy) {
-    if (m_selected_warp_idx < 0 || m_selected_warp_idx >= static_cast<int>(m_warps.size())) {
-        return;
-    }
-    WarpInstance& warp = m_warps[static_cast<std::size_t>(m_selected_warp_idx)];
-    if (dx != 0.0f) {
-        warp.height = ValidWarpHeight(warp.height, warp.width);
-        warp.width = ValidWarpWidth(warp.width + dx, warp.height);
-    }
-    if (dy != 0.0f) {
-        warp.width = ValidWarpWidth(warp.width, warp.height);
-        warp.height = ValidWarpHeight(warp.height + dy, warp.width);
-    }
-    ClampWarpToValidSize(warp);
-    UpdateWarpFloor(warp);
+    GLCanvasWarpEditor(*this).ResizeSelectedWarp(dx, dy);
 }
 
 void MyGLCanvas::RotateSelectedWarp(float dx, float dy) {
-    if (m_selected_warp_idx < 0 || m_selected_warp_idx >= static_cast<int>(m_warps.size())) {
-        return;
-    }
-    WarpInstance& warp = m_warps[static_cast<std::size_t>(m_selected_warp_idx)];
-    warp.x = std::clamp(warp.x + dx, 0.0f, 63.5f);
-    warp.y = std::clamp(warp.y + dy, 0.0f, 63.5f);
-    UpdateWarpFloor(warp);
+    GLCanvasWarpEditor(*this).RotateSelectedWarp(dx, dy);
 }
 
 void MyGLCanvas::CycleSelectedWarpType(int delta) {
-    if (m_selected_warp_idx < 0 || m_selected_warp_idx >= static_cast<int>(m_warps.size())) {
-        return;
-    }
-    WarpInstance& warp = m_warps[static_cast<std::size_t>(m_selected_warp_idx)];
-    int type = static_cast<int>(warp.warp.type);
-    type = (type + delta + 3) % 3;
-    warp.warp.type = static_cast<Landstalker::WarpList::Warp::Type>(type);
+    GLCanvasWarpEditor(*this).CycleSelectedWarpType(delta);
 }
 
 void MyGLCanvas::CycleSelectedDoorSize(int delta) {
-    ClearTileSwapPreview();
-    auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-    if (!rd || m_selected_door_idx < 0) {
-        return;
-    }
-    auto doors = rd->GetDoors(m_current_room);
-    if (m_selected_door_idx >= static_cast<int>(doors.size()) || delta == 0) {
-        return;
-    }
-
-    static constexpr std::array<Door::Size, 4> sizes{
-        Door::Size::DOOR_1X4,
-        Door::Size::DOOR_2X4,
-        Door::Size::DOOR_2X5,
-        Door::Size::DOOR_1X0
-    };
-
-    Door& door = doors[static_cast<std::size_t>(m_selected_door_idx)];
-    auto it = std::find(sizes.begin(), sizes.end(), door.size);
-    int idx = it == sizes.end() ? 0 : static_cast<int>(std::distance(sizes.begin(), it));
-    idx = (idx + delta + static_cast<int>(sizes.size())) % static_cast<int>(sizes.size());
-    door.size = sizes[static_cast<std::size_t>(idx)];
-    rd->SetDoors(m_current_room, doors);
+    GLCanvasTileDoorEditor(*this).CycleSelectedDoorSize(delta);
 }
 
 void MyGLCanvas::AddDoor() {
-    ClearTileSwapPreview();
-    auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-    if (!rd) {
-        return;
-    }
-
-    auto doors = rd->GetDoors(m_current_room);
-    auto [preferred_x, preferred_y] = MouseHeightmapCell();
-    auto cell_used = [&doors](int x, int y) {
-        for (const auto& door : doors) {
-            if (static_cast<int>(door.x) == x && static_cast<int>(door.y) == y) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    int best_x = preferred_x;
-    int best_y = preferred_y;
-    int best_dist = std::numeric_limits<int>::max();
-    bool found = false;
-    for (int y = 0; y <= 63; ++y) {
-        for (int x = 0; x <= 63; ++x) {
-            if (cell_used(x, y)) {
-                continue;
-            }
-            int dx = x - preferred_x;
-            int dy = y - preferred_y;
-            int dist = dx * dx + dy * dy;
-            if (dist < best_dist) {
-                best_dist = dist;
-                best_x = x;
-                best_y = y;
-                found = true;
-            }
-        }
-    }
-    if (!found) {
-        return;
-    }
-
-    doors.emplace_back(
-        static_cast<uint8_t>(best_x),
-        static_cast<uint8_t>(best_y),
-        Door::Size::DOOR_1X4);
-    rd->SetDoors(m_current_room, doors);
-
-    m_selected_entity_idx = -1;
-    m_selected_warp_idx = -1;
-    m_selected_tileswap_region_idx = -1;
-    m_hovered_entity_idx = -1;
-    m_hovered_warp_idx = -1;
-    m_hovered_tileswap_region_idx = -1;
-    m_selected_door_idx = static_cast<int>(doors.size() - 1);
-    m_hovered_door_idx = m_selected_door_idx;
+    GLCanvasTileDoorEditor(*this).AddDoor();
 }
 
 void MyGLCanvas::AddTileSwap() {
-    ClearTileSwapPreview();
-    auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-    if (!rd) {
-        return;
-    }
-
-    auto swaps = rd->GetTileSwaps(m_current_room);
-    std::set<int> used_triggers;
-    for (const auto& swap : swaps) {
-        used_triggers.insert(static_cast<int>(swap.trigger));
-    }
-
-    int trigger = -1;
-    for (int candidate = 0; candidate <= 31; ++candidate) {
-        if (used_triggers.count(candidate) == 0) {
-            trigger = candidate;
-            break;
-        }
-    }
-    if (trigger < 0) {
-        return;
-    }
-
-    auto cell_used = [&swaps](int x, int y) {
-        for (const auto& swap : swaps) {
-            auto contains = [x, y](const TileSwap::CopyOp& op, bool source) {
-                int rx = source ? op.src_x : op.dst_x;
-                int ry = source ? op.src_y : op.dst_y;
-                return x >= rx && x < rx + op.width && y >= ry && y < ry + op.height;
-            };
-            if (contains(swap.map, true) || contains(swap.map, false) ||
-                contains(swap.heightmap, true) || contains(swap.heightmap, false)) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    auto [preferred_x, preferred_y] = MouseHeightmapCell();
-    preferred_x = std::clamp(preferred_x, 0, 62);
-    preferred_y = std::clamp(preferred_y, 0, 63);
-    int src_x = preferred_x;
-    int src_y = preferred_y;
-    bool found = false;
-    int best_dist = std::numeric_limits<int>::max();
-    for (int y = 0; y < 64; ++y) {
-        for (int x = 0; x < 63; ++x) {
-            if (!cell_used(x, y) && !cell_used(x + 1, y)) {
-                int dx = x - preferred_x;
-                int dy = y - preferred_y;
-                int dist = dx * dx + dy * dy;
-                if (dist < best_dist) {
-                    best_dist = dist;
-                    src_x = x;
-                    src_y = y;
-                    found = true;
-                }
-            }
-        }
-    }
-    if (!found) {
-        return;
-    }
-
-    TileSwap swap;
-    swap.trigger = static_cast<uint8_t>(trigger);
-    swap.mode = TileSwap::Mode::FLOOR;
-    swap.map = {
-        static_cast<uint8_t>(src_x),
-        static_cast<uint8_t>(src_y),
-        static_cast<uint8_t>(src_x + 1),
-        static_cast<uint8_t>(src_y),
-        1,
-        1
-    };
-    swap.heightmap = swap.map;
-    swaps.push_back(swap);
-    rd->SetTileSwaps(m_current_room, swaps);
-
-    m_selected_entity_idx = -1;
-    m_selected_warp_idx = -1;
-    m_selected_tileswap_region_idx = static_cast<int>((swaps.size() - 1) * 4);
-    m_hovered_tileswap_region_idx = m_selected_tileswap_region_idx;
+    GLCanvasTileDoorEditor(*this).AddTileSwap();
 }
 
 void MyGLCanvas::CycleSelectedTileSwapShape(int delta) {
-    ClearTileSwapPreview();
-    auto regions = BuildTileSwapRegionGeometries(m_gd, m_current_room, m_mapRenderer, m_heightmapRenderer.GetZExtent());
-    if (m_selected_tileswap_region_idx < 0 ||
-        m_selected_tileswap_region_idx >= static_cast<int>(regions.size())) {
-        return;
-    }
-    const auto& region = regions[static_cast<std::size_t>(m_selected_tileswap_region_idx)];
-    auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-    if (!rd) {
-        return;
-    }
-    auto swaps = rd->GetTileSwaps(m_current_room);
-    if (region.swap_index < 0 || region.swap_index >= static_cast<int>(swaps.size())) {
-        return;
-    }
-    int mode = static_cast<int>(swaps[static_cast<std::size_t>(region.swap_index)].mode);
-    mode = (mode + delta + 3) % 3;
-    swaps[static_cast<std::size_t>(region.swap_index)].mode = static_cast<TileSwap::Mode>(mode);
-    rd->SetTileSwaps(m_current_room, swaps);
+    GLCanvasTileDoorEditor(*this).CycleSelectedTileSwapShape(delta);
 }
 
 void MyGLCanvas::CycleSelectedTileSwapId(int delta) {
-    ClearTileSwapPreview();
-    auto regions = BuildTileSwapRegionGeometries(m_gd, m_current_room, m_mapRenderer, m_heightmapRenderer.GetZExtent());
-    if (m_selected_tileswap_region_idx < 0 ||
-        m_selected_tileswap_region_idx >= static_cast<int>(regions.size())) {
-        return;
-    }
-
-    const auto& region = regions[static_cast<std::size_t>(m_selected_tileswap_region_idx)];
-    auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-    if (!rd) {
-        return;
-    }
-    auto swaps = rd->GetTileSwaps(m_current_room);
-    if (region.swap_index < 0 || region.swap_index >= static_cast<int>(swaps.size()) || delta == 0) {
-        return;
-    }
-
-    std::set<int> used_triggers;
-    for (int i = 0; i < static_cast<int>(swaps.size()); ++i) {
-        if (i != region.swap_index) {
-            used_triggers.insert(static_cast<int>(swaps[static_cast<std::size_t>(i)].trigger));
-        }
-    }
-
-    int id = static_cast<int>(swaps[static_cast<std::size_t>(region.swap_index)].trigger);
-    int step = delta >= 0 ? 1 : -1;
-    for (int attempt = 0; attempt < 32; ++attempt) {
-        int candidate = (id + step * (attempt + 1) + 32) % 32;
-        if (used_triggers.count(candidate) == 0) {
-            swaps[static_cast<std::size_t>(region.swap_index)].trigger = static_cast<uint8_t>(candidate);
-            rd->SetTileSwaps(m_current_room, swaps);
-            return;
-        }
-    }
-
-    // If every trigger is already in use, swap with the next/previous trigger owner.
-    int candidate = (id + step + 32) % 32;
-    for (int i = 0; i < static_cast<int>(swaps.size()); ++i) {
-        if (i == region.swap_index) {
-            continue;
-        }
-        if (static_cast<int>(swaps[static_cast<std::size_t>(i)].trigger) == candidate) {
-            swaps[static_cast<std::size_t>(i)].trigger = static_cast<uint8_t>(id);
-            swaps[static_cast<std::size_t>(region.swap_index)].trigger = static_cast<uint8_t>(candidate);
-            rd->SetTileSwaps(m_current_room, swaps);
-            return;
-        }
-    }
+    GLCanvasTileDoorEditor(*this).CycleSelectedTileSwapId(delta);
 }
 
 void MyGLCanvas::ResizeSelectedTileSwapRegion(float requested_width, float requested_height) {
-    ClearTileSwapPreview();
-    auto regions = BuildTileSwapRegionGeometries(m_gd, m_current_room, m_mapRenderer, m_heightmapRenderer.GetZExtent());
-    if (m_selected_tileswap_region_idx < 0 ||
-        m_selected_tileswap_region_idx >= static_cast<int>(regions.size())) {
-        return;
-    }
-    const auto& region = regions[static_cast<std::size_t>(m_selected_tileswap_region_idx)];
-    auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-    if (!rd) {
-        return;
-    }
-    auto swaps = rd->GetTileSwaps(m_current_room);
-    if (region.swap_index < 0 || region.swap_index >= static_cast<int>(swaps.size())) {
-        return;
-    }
-    TileSwap& swap = swaps[static_cast<std::size_t>(region.swap_index)];
-    TileSwapRegionMetrics metrics = MetricsForTileSwapRegion(swap, region.part);
-    int width = metrics.width;
-    int height = metrics.height;
-    if (requested_width > 0.0f) {
-        width = std::clamp(static_cast<int>(std::round(requested_width)), 1, std::max(1, 64 - metrics.x));
-    }
-    if (requested_height > 0.0f) {
-        height = std::clamp(static_cast<int>(std::round(requested_height)), 1, std::max(1, 64 - metrics.y));
-    }
-    if (region.part == TileSwapRegionPart::TilemapSource ||
-        region.part == TileSwapRegionPart::TilemapDestination) {
-        swap.map.width = static_cast<uint8_t>(width);
-        swap.map.height = static_cast<uint8_t>(height);
-    } else {
-        swap.heightmap.width = static_cast<uint8_t>(width);
-        swap.heightmap.height = static_cast<uint8_t>(height);
-    }
-    rd->SetTileSwaps(m_current_room, swaps);
+    GLCanvasTileDoorEditor(*this).ResizeSelectedTileSwapRegion(requested_width, requested_height);
 }
 
 void MyGLCanvas::ToggleSelectedTileSwapPreview() {
-    auto regions = BuildTileSwapRegionGeometries(m_gd, m_current_room, m_mapRenderer, m_heightmapRenderer.GetZExtent());
-    if (m_selected_tileswap_region_idx < 0 ||
-        m_selected_tileswap_region_idx >= static_cast<int>(regions.size())) {
-        return;
-    }
-
-    int swap_index = regions[static_cast<std::size_t>(m_selected_tileswap_region_idx)].swap_index;
-    if (m_tileswap_preview_active && m_tileswap_preview_swap_index == swap_index) {
-        ClearTileSwapPreview();
-        return;
-    }
-
-    ClearTileSwapPreview();
-
-    auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-    if (!rd) {
-        return;
-    }
-    auto map_entry = rd->GetMapForRoom(m_current_room);
-    if (!map_entry) {
-        return;
-    }
-    auto map = map_entry->GetData();
-    if (!map) {
-        return;
-    }
-    auto swaps = rd->GetTileSwaps(m_current_room);
-    if (swap_index < 0 || swap_index >= static_cast<int>(swaps.size())) {
-        return;
-    }
-
-    m_tileswap_preview_map = std::make_shared<Tilemap3D>(*map);
-    const TileSwap& swap = swaps[static_cast<std::size_t>(swap_index)];
-    swap.DrawSwap(*m_tileswap_preview_map, Tilemap3D::Layer::BG);
-    swap.DrawSwap(*m_tileswap_preview_map, Tilemap3D::Layer::FG);
-    swap.DrawHeightmapSwap(*m_tileswap_preview_map);
-
-    m_tileswap_preview_active = true;
-    m_tileswap_preview_swap_index = swap_index;
-    m_mapRenderer.LoadPreviewRoom(m_current_room, *m_tileswap_preview_map);
-    m_heightmapRenderer.SetPreviewMap(m_tileswap_preview_map);
-    RefreshObjectPlacementsFromHeightmap();
+    GLCanvasTileDoorEditor(*this).ToggleSelectedTileSwapPreview();
 }
 
 void MyGLCanvas::ToggleSelectedDoorPreview() {
-    auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-    if (!rd || m_selected_door_idx < 0) {
-        return;
-    }
-
-    auto doors = rd->GetDoors(m_current_room);
-    if (m_selected_door_idx >= static_cast<int>(doors.size())) {
-        return;
-    }
-
-    if (m_door_preview_active && m_door_preview_idx == m_selected_door_idx) {
-        ClearTileSwapPreview();
-        return;
-    }
-
-    ClearTileSwapPreview();
-
-    auto map_entry = rd->GetMapForRoom(m_current_room);
-    if (!map_entry) {
-        return;
-    }
-    auto map = map_entry->GetData();
-    if (!map) {
-        return;
-    }
-
-    m_tileswap_preview_map = std::make_shared<Tilemap3D>(*map);
-    doors[static_cast<std::size_t>(m_selected_door_idx)].DrawDoor(*m_tileswap_preview_map, Tilemap3D::Layer::FG);
-
-    m_door_preview_active = true;
-    m_door_preview_idx = m_selected_door_idx;
-    m_mapRenderer.LoadPreviewRoom(m_current_room, *m_tileswap_preview_map);
-    m_heightmapRenderer.SetPreviewMap(m_tileswap_preview_map);
-    RefreshObjectPlacementsFromHeightmap();
+    GLCanvasTileDoorEditor(*this).ToggleSelectedDoorPreview();
 }
 
 void MyGLCanvas::ClearTileSwapPreview() {
-    if (!m_tileswap_preview_active && !m_door_preview_active && !m_tileswap_preview_map) {
-        return;
-    }
-
-    m_tileswap_preview_active = false;
-    m_tileswap_preview_swap_index = -1;
-    m_door_preview_active = false;
-    m_door_preview_idx = -1;
-    m_tileswap_preview_map.reset();
-    m_heightmapRenderer.ClearPreviewMap();
-    if (m_initialized) {
-        m_mapRenderer.LoadRoom(m_current_room);
-        RefreshObjectPlacementsFromHeightmap();
-    }
+    GLCanvasTileDoorEditor(*this).ClearTileSwapPreview();
 }
 
 void MyGLCanvas::NudgeSelectedObject(float dx, float dy, float dz) {
-    if (m_selected_door_idx >= 0) {
-        ClearTileSwapPreview();
-        auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-        if (!rd) {
-            return;
-        }
-        auto doors = rd->GetDoors(m_current_room);
-        if (m_selected_door_idx < 0 || m_selected_door_idx >= static_cast<int>(doors.size())) {
-            m_selected_door_idx = -1;
-            m_hovered_door_idx = -1;
-            return;
-        }
-        Door& door = doors[static_cast<std::size_t>(m_selected_door_idx)];
-        door.x = static_cast<uint8_t>(std::clamp(static_cast<int>(door.x) + static_cast<int>(dx), 0, 63));
-        door.y = static_cast<uint8_t>(std::clamp(static_cast<int>(door.y) + static_cast<int>(dy), 0, 63));
-        rd->SetDoors(m_current_room, doors);
-        m_hovered_door_idx = m_selected_door_idx;
-        return;
-    }
-
-    if (m_selected_tileswap_region_idx >= 0) {
-        ClearTileSwapPreview();
-        auto regions = BuildTileSwapRegionGeometries(m_gd, m_current_room, m_mapRenderer, m_heightmapRenderer.GetZExtent());
-        if (m_selected_tileswap_region_idx >= static_cast<int>(regions.size())) {
-            m_selected_tileswap_region_idx = -1;
-            return;
-        }
-        const auto& region = regions[static_cast<std::size_t>(m_selected_tileswap_region_idx)];
-        auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-        if (!rd) {
-            return;
-        }
-        auto swaps = rd->GetTileSwaps(m_current_room);
-        if (region.swap_index < 0 || region.swap_index >= static_cast<int>(swaps.size())) {
-            return;
-        }
-        TileSwap& swap = swaps[static_cast<std::size_t>(region.swap_index)];
-        TileSwapRegionMetrics metrics = MetricsForTileSwapRegion(swap, region.part);
-        int x = std::clamp(metrics.x + static_cast<int>(dx), 0, std::max(0, 64 - metrics.width));
-        int y = std::clamp(metrics.y + static_cast<int>(dy), 0, std::max(0, 64 - metrics.height));
-        switch (region.part) {
-            case TileSwapRegionPart::TilemapSource:
-                swap.map.src_x = static_cast<uint8_t>(x);
-                swap.map.src_y = static_cast<uint8_t>(y);
-                break;
-            case TileSwapRegionPart::TilemapDestination:
-                swap.map.dst_x = static_cast<uint8_t>(x);
-                swap.map.dst_y = static_cast<uint8_t>(y);
-                break;
-            case TileSwapRegionPart::HeightmapSource:
-                swap.heightmap.src_x = static_cast<uint8_t>(x);
-                swap.heightmap.src_y = static_cast<uint8_t>(y);
-                break;
-            case TileSwapRegionPart::HeightmapDestination:
-                swap.heightmap.dst_x = static_cast<uint8_t>(x);
-                swap.heightmap.dst_y = static_cast<uint8_t>(y);
-                break;
-        }
-        rd->SetTileSwaps(m_current_room, swaps);
-        return;
-    }
-
-    if (m_selected_entity_idx >= 0 && m_selected_entity_idx < static_cast<int>(m_instances.size())) {
-        uint32_t selected_id = m_instances[static_cast<std::size_t>(m_selected_entity_idx)].instance_id;
-        SpriteInstance& inst = m_instances[static_cast<std::size_t>(m_selected_entity_idx)];
-        bool was_on_floor = std::abs(inst.map_z - inst.floor_z) <= 0.01f;
-
-        inst.map_x = std::clamp(inst.map_x + dx * 0.5f, 0.0f, 63.5f);
-        inst.map_y = std::clamp(inst.map_y + dy * 0.5f, 0.0f, 63.5f);
-        inst.map_z = std::clamp(inst.map_z + dz, 0.0f, 15.5f);
-        inst.floor_z = FloorUnderHitbox(
-            inst.map_x + inst.hitbox_offset,
-            inst.map_y + inst.hitbox_offset,
-            inst.hitbox_base * 0.5f);
-        if (dz == 0.0f && was_on_floor) {
-            inst.map_z = std::clamp(inst.floor_z, 0.0f, 15.5f);
-        }
-
-        UpdateEntityProjection(inst);
-        SortEntitiesGeometrically(m_instances);
-        m_selected_entity_idx = FindInstanceIndex(selected_id);
-        m_hovered_entity_idx = m_selected_entity_idx;
-        m_selected_warp_idx = -1;
-        m_hovered_warp_idx = -1;
-        return;
-    }
-
-    if (m_selected_warp_idx >= 0 && m_selected_warp_idx < static_cast<int>(m_warps.size())) {
-        WarpInstance& warp = m_warps[static_cast<std::size_t>(m_selected_warp_idx)];
-        warp.x = std::clamp(warp.x + dx, 0.0f, 63.5f);
-        warp.y = std::clamp(warp.y + dy, 0.0f, 63.5f);
-        UpdateWarpFloor(warp);
-        m_selected_entity_idx = -1;
-        m_hovered_entity_idx = -1;
-    }
+    GLCanvasObjectCoordinator(*this).NudgeSelectedObject(dx, dy, dz);
 }
 
 void MyGLCanvas::RenderWarps() {
-    glUseProgram(0);
-    for (int i = 0; i <= 5; ++i) {
-        glActiveTexture(GL_TEXTURE0 + i);
-        glDisable(GL_TEXTURE_2D);
-    }
-    glActiveTexture(GL_TEXTURE0);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    for (std::size_t i = 0; i < m_warps.size(); ++i) {
-        const WarpInstance& warp = m_warps[i];
-        auto quad = WarpQuad(warp);
-        if (static_cast<int>(i) == m_selected_warp_idx) {
-            auto selected_quad = WarpQuad(warp, -0.08f);
-            glLineWidth(3.0f);
-            glColor4f(1.0f, 0.0f, 0.0f, 0.95f);
-            glBegin(GL_LINE_LOOP);
-            for (const auto& point : selected_quad) {
-                glVertex2f(point.x, point.y);
-            }
-            glEnd();
-        }
-
-        if (warp.DestinationRoom() == 0xFFFF) {
-            glColor4f(1.0f, 0.05f, 0.05f, 0.95f);
-        } else {
-            switch (warp.warp.type) {
-                case Landstalker::WarpList::Warp::Type::STAIR_SE:
-                    glColor4f(0.0f, 0.95f, 1.0f, 0.95f);
-                    break;
-                case Landstalker::WarpList::Warp::Type::STAIR_SW:
-                    glColor4f(0.1f, 1.0f, 0.1f, 0.95f);
-                    break;
-                case Landstalker::WarpList::Warp::Type::NORMAL:
-                default:
-                    glColor4f(1.0f, 0.95f, 0.0f, 0.95f);
-                    break;
-            }
-        }
-
-        glLineWidth(1.0f);
-        glBegin(GL_LINE_LOOP);
-        for (const auto& point : quad) {
-            glVertex2f(point.x, point.y);
-        }
-        glEnd();
-
-        if (static_cast<int>(i) == m_selected_warp_idx) {
-            for (int axis = 1; axis <= 2; ++axis) {
-                PickRect rect = WarpResizeControlRect(warp, axis);
-                bool usable = WarpResizeAxisUsable(warp, axis);
-                glColor4f(0.02f, 0.02f, 0.02f, 0.6f);
-                glBegin(GL_QUADS);
-                glVertex2f(rect.min_x, rect.min_y);
-                glVertex2f(rect.max_x, rect.min_y);
-                glVertex2f(rect.max_x, rect.max_y);
-                glVertex2f(rect.min_x, rect.max_y);
-                glEnd();
-
-                if (!usable) {
-                    glColor4f(0.8f, 0.1f, 0.1f, 0.75f);
-                } else if (axis == 1) {
-                    glColor4f(1.0f, 0.95f, 0.1f, 0.95f);
-                } else {
-                    glColor4f(0.0f, 0.95f, 1.0f, 0.95f);
-                }
-                glLineWidth(2.0f);
-                glBegin(GL_LINE_LOOP);
-                glVertex2f(rect.min_x, rect.min_y);
-                glVertex2f(rect.max_x, rect.min_y);
-                glVertex2f(rect.max_x, rect.max_y);
-                glVertex2f(rect.min_x, rect.max_y);
-                glEnd();
-                if (!usable) {
-                    glBegin(GL_LINES);
-                    glVertex2f(rect.min_x + 2.0f, rect.min_y + 2.0f);
-                    glVertex2f(rect.max_x - 2.0f, rect.max_y - 2.0f);
-                    glVertex2f(rect.max_x - 2.0f, rect.min_y + 2.0f);
-                    glVertex2f(rect.min_x + 2.0f, rect.max_y - 2.0f);
-                    glEnd();
-                }
-                glLineWidth(1.0f);
-            }
-        }
-    }
-
-    glLineWidth(1.0f);
+    GLCanvasWarpEditor(*this).RenderWarps();
 }
 
 void MyGLCanvas::RenderEntityControls() {
@@ -4184,343 +2805,19 @@ void MyGLCanvas::RenderEntityControls() {
 }
 
 void MyGLCanvas::RenderSelectedEntityTooltip() {
-    if (m_selected_entity_idx < 0 || m_selected_entity_idx >= static_cast<int>(m_instances.size())) {
-        return;
-    }
-
-    const SpriteInstance& inst = m_instances[static_cast<std::size_t>(m_selected_entity_idx)];
-    float center_x = inst.map_x + inst.hitbox_offset;
-    float center_y = inst.map_y + inst.hitbox_offset;
-    float top_z = inst.map_z + std::max(inst.hitbox_height, 0.125f);
-    PickPoint anchor = ProjectEntityGridPoint(inst, center_x, center_y, top_z);
-
-    auto fmt = [](float value) {
-        std::ostringstream out;
-        out << std::fixed << std::setprecision(1) << value;
-        return out.str();
-    };
-
-    std::array<std::string, 5> lines = {
-        std::string{"I:"} + std::to_string(std::clamp<int>(static_cast<int>(inst.instance_id), 1, 15)),
-        std::string{"EID:"} + HexByte(inst.entity_id),
-        std::string{"X:"} + fmt(inst.map_x),
-        std::string{"Y:"} + fmt(inst.map_y),
-        std::string{"Z:"} + fmt(inst.map_z)
-    };
-
-    float zoom = std::max(ZoomFactor(), 0.0001f);
-    float scale = 1.0f;
-    float line_height = 10.0f;
-    float char_width = 6.0f * scale;
-    float text_w = 0.0f;
-    for (const auto& line : lines) {
-        text_w = std::max(text_w, float(line.size()) * char_width);
-    }
-    float text_h = float(lines.size()) * line_height;
-    float x = anchor.x * zoom + m_cam_x + 14.0f;
-    float y = anchor.y * zoom + m_cam_y - 44.0f;
-
-    int w = 0;
-    int h = 0;
-    GetClientSize(&w, &h);
-
-    glUseProgram(0);
-    for (int i = 0; i <= 5; ++i) {
-        glActiveTexture(GL_TEXTURE0 + i);
-        glDisable(GL_TEXTURE_2D);
-    }
-    glActiveTexture(GL_TEXTURE0);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glOrtho(0, w, h, 0, -1, 1);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-
-    glColor4f(0.02f, 0.02f, 0.025f, 0.72f);
-    glBegin(GL_QUADS);
-    glVertex2f(x - 5.0f, y - 5.0f);
-    glVertex2f(x + text_w + 5.0f, y - 5.0f);
-    glVertex2f(x + text_w + 5.0f, y + text_h + 2.0f);
-    glVertex2f(x - 5.0f, y + text_h + 2.0f);
-    glEnd();
-
-    glLineWidth(1.0f);
-    glColor4f(0.9f, 0.9f, 0.88f, 0.95f);
-    for (std::size_t i = 0; i < lines.size(); ++i) {
-        DrawOverlayText(lines[i], x, y + float(i) * line_height, scale);
-    }
+    GLCanvasEntityEditor(*this).RenderSelectedEntityTooltip();
 }
 
 void MyGLCanvas::RenderSelectedWarpTooltip() {
-    if (m_selected_warp_idx < 0 || m_selected_warp_idx >= static_cast<int>(m_warps.size())) {
-        return;
-    }
-
-    const WarpInstance& warp = m_warps[static_cast<std::size_t>(m_selected_warp_idx)];
-    PickPoint anchor = ProjectWarpGridPoint(warp, warp.x + warp.width, warp.y + warp.height, warp.floor_z);
-
-    auto fmt = [](float value) {
-        std::ostringstream out;
-        out << std::fixed << std::setprecision(0) << value;
-        return out.str();
-    };
-
-    std::array<std::string, 4> lines = {
-        std::string{"ID:"} + std::to_string(warp.instance_id),
-        std::string{"X:"} + fmt(warp.x),
-        std::string{"Y:"} + fmt(warp.y),
-        std::string{"D:"} + HexWord(warp.DestinationRoom())
-    };
-
-    float zoom = std::max(ZoomFactor(), 0.0001f);
-    float scale = 1.0f;
-    float line_height = 10.0f;
-    float char_width = 6.0f * scale;
-    float text_w = 0.0f;
-    for (const auto& line : lines) {
-        text_w = std::max(text_w, float(line.size()) * char_width);
-    }
-    float text_h = float(lines.size()) * line_height;
-    float x = anchor.x * zoom + m_cam_x + 48.0f;
-    float y = anchor.y * zoom + m_cam_y - 34.0f;
-
-    int w = 0;
-    int h = 0;
-    GetClientSize(&w, &h);
-
-    glUseProgram(0);
-    for (int i = 0; i <= 5; ++i) {
-        glActiveTexture(GL_TEXTURE0 + i);
-        glDisable(GL_TEXTURE_2D);
-    }
-    glActiveTexture(GL_TEXTURE0);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glOrtho(0, w, h, 0, -1, 1);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-
-    glColor4f(0.02f, 0.02f, 0.025f, 0.72f);
-    glBegin(GL_QUADS);
-    glVertex2f(x - 5.0f, y - 5.0f);
-    glVertex2f(x + text_w + 5.0f, y - 5.0f);
-    glVertex2f(x + text_w + 5.0f, y + text_h + 2.0f);
-    glVertex2f(x - 5.0f, y + text_h + 2.0f);
-    glEnd();
-
-    if (warp.DestinationRoom() == 0xFFFF) {
-        glColor4f(1.0f, 0.2f, 0.2f, 0.95f);
-    } else {
-        glColor4f(0.9f, 0.9f, 0.88f, 0.95f);
-    }
-    glLineWidth(1.0f);
-    for (std::size_t i = 0; i < lines.size(); ++i) {
-        DrawOverlayText(lines[i], x, y + float(i) * line_height, scale);
-    }
+    GLCanvasWarpEditor(*this).RenderSelectedWarpTooltip();
 }
 
 void MyGLCanvas::RenderSelectedDoorTooltip() {
-    auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
-    if (!rd || m_selected_door_idx < 0) {
-        return;
-    }
-
-    auto doors = rd->GetDoors(m_current_room);
-    if (m_selected_door_idx >= static_cast<int>(doors.size())) {
-        return;
-    }
-
-    auto geometries = BuildDoorGeometries(
-        m_gd,
-        m_current_room,
-        m_mapRenderer,
-        m_heightmapRenderer.GetZExtent(),
-        m_tileswap_preview_map);
-
-    PickPoint anchor{0.0f, 0.0f};
-    for (const auto& geom : geometries) {
-        if (geom.index == m_selected_door_idx) {
-            anchor = geom.bounds.max_x != geom.bounds.min_x || geom.bounds.max_y != geom.bounds.min_y
-                ? PickPoint{geom.bounds.max_x, geom.bounds.min_y}
-                : (geom.cell_points.empty() ? PickPoint{0.0f, 0.0f} : geom.cell_points.front());
-            break;
-        }
-    }
-
-    const Door& door = doors[static_cast<std::size_t>(m_selected_door_idx)];
-    const char* type_label = "Invalid";
-    auto map_entry = rd->GetMapForRoom(m_current_room);
-    if (map_entry) {
-        auto map = map_entry->GetData();
-        int x = static_cast<int>(door.x);
-        int y = static_cast<int>(door.y);
-        if (x >= 0 && y >= 0 && x < map->GetHeightmapWidth() && y < map->GetHeightmapHeight()) {
-            auto floor_type = static_cast<Tilemap3D::FloorType>(map->GetCellType({x, y}));
-            if (floor_type == Tilemap3D::FloorType::DOOR_NW) {
-                type_label = "NW";
-            } else if (floor_type == Tilemap3D::FloorType::DOOR_NE) {
-                type_label = "NE";
-            }
-        }
-    }
-
-    std::array<std::string, 4> lines = {
-        std::string{"ID:"} + HexByte(static_cast<uint8_t>(std::clamp(m_selected_door_idx + 1, 0, 255))),
-        std::string{"X:"} + std::to_string(static_cast<int>(door.x)),
-        std::string{"Y:"} + std::to_string(static_cast<int>(door.y)),
-        std::string{"T:"} + type_label
-    };
-
-    float zoom = std::max(ZoomFactor(), 0.0001f);
-    float scale = 1.0f;
-    float line_height = 10.0f;
-    float char_width = 6.0f * scale;
-    float text_w = 0.0f;
-    for (const auto& line : lines) {
-        text_w = std::max(text_w, float(line.size()) * char_width);
-    }
-    float text_h = float(lines.size()) * line_height;
-    float x = anchor.x * zoom + m_cam_x + 12.0f;
-    float y = anchor.y * zoom + m_cam_y - 20.0f;
-
-    int w = 0;
-    int h = 0;
-    GetClientSize(&w, &h);
-
-    glUseProgram(0);
-    for (int i = 0; i <= 5; ++i) {
-        glActiveTexture(GL_TEXTURE0 + i);
-        glDisable(GL_TEXTURE_2D);
-    }
-    glActiveTexture(GL_TEXTURE0);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glOrtho(0, w, h, 0, -1, 1);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-
-    glColor4f(0.02f, 0.02f, 0.025f, 0.72f);
-    glBegin(GL_QUADS);
-    glVertex2f(x - 5.0f, y - 5.0f);
-    glVertex2f(x + text_w + 5.0f, y - 5.0f);
-    glVertex2f(x + text_w + 5.0f, y + text_h + 2.0f);
-    glVertex2f(x - 5.0f, y + text_h + 2.0f);
-    glEnd();
-
-    glLineWidth(1.0f);
-    glColor4f(0.9f, 0.9f, 0.88f, 0.95f);
-    for (std::size_t i = 0; i < lines.size(); ++i) {
-        DrawOverlayText(lines[i], x, y + float(i) * line_height, scale);
-    }
+    GLCanvasTileDoorEditor(*this).RenderSelectedDoorTooltip();
 }
 
 void MyGLCanvas::RenderSelectedTileSwapRegionTooltip() {
-    auto regions = BuildTileSwapRegionGeometries(m_gd, m_current_room, m_mapRenderer, m_heightmapRenderer.GetZExtent());
-    if (m_selected_tileswap_region_idx < 0 ||
-        m_selected_tileswap_region_idx >= static_cast<int>(regions.size())) {
-        return;
-    }
-
-    const auto& region = regions[static_cast<std::size_t>(m_selected_tileswap_region_idx)];
-    const TileSwap& swap = region.swap;
-    int x = 0;
-    int y = 0;
-    int width = 0;
-    int height = 0;
-    switch (region.part) {
-        case TileSwapRegionPart::TilemapSource:
-            x = swap.map.src_x;
-            y = swap.map.src_y;
-            width = swap.map.width;
-            height = swap.map.height;
-            break;
-        case TileSwapRegionPart::TilemapDestination:
-            x = swap.map.dst_x;
-            y = swap.map.dst_y;
-            width = swap.map.width;
-            height = swap.map.height;
-            break;
-        case TileSwapRegionPart::HeightmapSource:
-            x = swap.heightmap.src_x;
-            y = swap.heightmap.src_y;
-            width = swap.heightmap.width;
-            height = swap.heightmap.height;
-            break;
-        case TileSwapRegionPart::HeightmapDestination:
-            x = swap.heightmap.dst_x;
-            y = swap.heightmap.dst_y;
-            width = swap.heightmap.width;
-            height = swap.heightmap.height;
-            break;
-    }
-
-    auto two_digits = [](int value) {
-        std::ostringstream out;
-        out << std::setw(2) << std::setfill('0') << std::clamp(value, 0, 99);
-        return out.str();
-    };
-
-    std::array<std::string, 5> lines = {
-        std::string{"ID:"} + two_digits(static_cast<int>(swap.trigger)),
-        std::string{TileSwapPartLabel(region.part)},
-        std::string{"SH:"} + TileSwapShapeLabel(swap.mode),
-        std::string{"SZ:"} + two_digits(width) + "X" + two_digits(height),
-        std::string{"XY:"} + two_digits(x) + "." + two_digits(y)
-    };
-
-    constexpr float scale = 1.0f;
-    constexpr float line_height = 10.0f;
-    constexpr float char_width = 6.0f * scale;
-    float text_w = 0.0f;
-    for (const auto& line : lines) {
-        text_w = std::max(text_w, float(line.size()) * char_width);
-    }
-    float text_h = float(lines.size()) * line_height;
-    float zoom = std::max(ZoomFactor(), 0.0001f);
-    float tooltip_x = region.bounds.max_x * zoom + m_cam_x + 10.0f;
-    float tooltip_y = region.bounds.min_y * zoom + m_cam_y - 4.0f;
-
-    int w = 0;
-    int h = 0;
-    GetClientSize(&w, &h);
-
-    glUseProgram(0);
-    for (int i = 0; i <= 5; ++i) {
-        glActiveTexture(GL_TEXTURE0 + i);
-        glDisable(GL_TEXTURE_2D);
-    }
-    glActiveTexture(GL_TEXTURE0);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glOrtho(0, w, h, 0, -1, 1);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-
-    glColor4f(0.02f, 0.02f, 0.025f, 0.72f);
-    glBegin(GL_QUADS);
-    glVertex2f(tooltip_x - 5.0f, tooltip_y - 5.0f);
-    glVertex2f(tooltip_x + text_w + 5.0f, tooltip_y - 5.0f);
-    glVertex2f(tooltip_x + text_w + 5.0f, tooltip_y + text_h + 2.0f);
-    glVertex2f(tooltip_x - 5.0f, tooltip_y + text_h + 2.0f);
-    glEnd();
-
-    glLineWidth(1.0f);
-    glColor4f(0.9f, 0.9f, 0.88f, 0.95f);
-    for (std::size_t i = 0; i < lines.size(); ++i) {
-        DrawOverlayText(lines[i], tooltip_x, tooltip_y + float(i) * line_height, scale);
-    }
+    GLCanvasTileDoorEditor(*this).RenderSelectedTileSwapRegionTooltip();
 }
 
 void MyGLCanvas::RenderRoomInfoTable(int width, int height) {
@@ -4663,107 +2960,42 @@ void MyGLCanvas::WriteSelectedEntityOcclusionDebugLog() {
 }
 
 void MyGLCanvas::WriteEntityDrawOrderDebugLog() {
-    uint32_t selected_entity_id = 0;
-    uint32_t hovered_entity_id = 0;
-    if (m_selected_entity_idx >= 0 && m_selected_entity_idx < static_cast<int>(m_instances.size())) {
-        selected_entity_id = m_instances[static_cast<std::size_t>(m_selected_entity_idx)].instance_id;
-    }
-    if (m_hovered_entity_idx >= 0 && m_hovered_entity_idx < static_cast<int>(m_instances.size())) {
-        hovered_entity_id = m_instances[static_cast<std::size_t>(m_hovered_entity_idx)].instance_id;
-    }
-
-    SortEntitiesGeometrically(m_instances);
-    m_selected_entity_idx = selected_entity_id != 0 ? FindInstanceIndex(selected_entity_id) : -1;
-    m_hovered_entity_idx = hovered_entity_id != 0 ? FindInstanceIndex(hovered_entity_id) : -1;
-
     constexpr const char* path = "/tmp/landstalker_entity_draw_order.log";
     std::ofstream log(path, std::ios::out | std::ios::trunc);
     if (!log.is_open()) {
-        wxLogMessage("Unable to write entity draw-order log to %s", path);
+        wxLogMessage("Failed to write entity draw-order log to %s", path);
         return;
     }
 
-    log << std::fixed << std::setprecision(3);
-    log << "room," << m_current_room << "\n";
-    log << "selected_index," << m_selected_entity_idx << "\n";
-    log << "hovered_index," << m_hovered_entity_idx << "\n";
-    log << "entity_count," << m_instances.size() << "\n";
-    log << "note,rows are in actual render order; later rows draw over earlier rows\n\n";
-    log << "render_order,index,instance_id,entity_id,selected,hovered,map_x,map_y,map_z,floor_z,depth_key,hitbox_base,hitbox_height,hitbox_offset,min_x,min_y,max_x,max_y,min_z,max_z,back_depth,front_depth,screen_x,screen_y,depth_back,depth_front\n";
-
-    for (std::size_t i = 0; i < m_instances.size(); ++i) {
-        const SpriteInstance& inst = m_instances[i];
-        auto depth_range = EntityOcclusionDebugDepthRange(inst);
+    log << "instance_id,map_x,map_y,map_z,floor_z,hitbox_base,hitbox_height,depth_key,min_x,min_y,max_x,max_y,min_z,max_z\n";
+    for (const auto& inst : m_instances) {
         EntityBounds bounds = GetEntityBounds(inst);
         float depth_key = EntityFrontDepthKey(inst);
-        log << i << ","
-            << i << ","
-            << inst.instance_id << ","
-            << int(inst.entity_id) << ","
-            << (static_cast<int>(i) == m_selected_entity_idx ? 1 : 0) << ","
-            << (static_cast<int>(i) == m_hovered_entity_idx ? 1 : 0) << ","
+        log << inst.instance_id << ","
             << inst.map_x << ","
             << inst.map_y << ","
             << inst.map_z << ","
             << inst.floor_z << ","
-            << depth_key << ","
             << inst.hitbox_base << ","
             << inst.hitbox_height << ","
-            << inst.hitbox_offset << ","
+            << depth_key << ","
             << bounds.min_x << ","
             << bounds.min_y << ","
             << bounds.max_x << ","
             << bounds.max_y << ","
             << bounds.min_z << ","
-            << bounds.max_z << ","
-            << bounds.back_depth << ","
-            << bounds.front_depth << ","
-            << inst.x << ","
-            << inst.y << ","
-            << depth_range.first << ","
-            << depth_range.second
-            << "\n";
+            << bounds.max_z << "\n";
     }
 
-    log << "\n";
-    log << "pair_a,pair_b,a_before_b,b_before_a,a_instance,b_instance,a_entity,b_entity,a_front_depth,b_front_depth,footprints_overlap,z_ranges_overlap,a_min_x,a_min_y,a_max_x,a_max_y,a_min_z,a_max_z,b_min_x,b_min_y,b_max_x,b_max_y,b_min_z,b_max_z\n";
-    for (std::size_t a = 0; a < m_instances.size(); ++a) {
-        for (std::size_t b = a + 1; b < m_instances.size(); ++b) {
-            const SpriteInstance& lhs = m_instances[a];
-            const SpriteInstance& rhs = m_instances[b];
-            EntityBounds lhs_bounds = GetEntityBounds(lhs);
-            EntityBounds rhs_bounds = GetEntityBounds(rhs);
-            bool footprints_overlap = lhs_bounds.min_x < rhs_bounds.max_x - 0.001f &&
-                                      lhs_bounds.max_x > rhs_bounds.min_x + 0.001f &&
-                                      lhs_bounds.min_y < rhs_bounds.max_y - 0.001f &&
-                                      lhs_bounds.max_y > rhs_bounds.min_y + 0.001f;
-            bool z_ranges_overlap = lhs_bounds.min_z < rhs_bounds.max_z - 0.001f &&
-                                    lhs_bounds.max_z > rhs_bounds.min_z + 0.001f;
-            log << a << ","
-                << b << ","
-                << (EntityMustDrawBefore(lhs, rhs) ? 1 : 0) << ","
-                << (EntityMustDrawBefore(rhs, lhs) ? 1 : 0) << ","
-                << lhs.instance_id << ","
+    log << "\nrelations,lhs_id,rhs_id,lhs_before_rhs,rhs_before_lhs\n";
+    for (std::size_t i = 0; i < m_instances.size(); ++i) {
+        for (std::size_t j = i + 1; j < m_instances.size(); ++j) {
+            const auto& lhs = m_instances[i];
+            const auto& rhs = m_instances[j];
+            log << lhs.instance_id << ","
                 << rhs.instance_id << ","
-                << int(lhs.entity_id) << ","
-                << int(rhs.entity_id) << ","
-                << lhs_bounds.front_depth << ","
-                << rhs_bounds.front_depth << ","
-                << (footprints_overlap ? 1 : 0) << ","
-                << (z_ranges_overlap ? 1 : 0) << ","
-                << lhs_bounds.min_x << ","
-                << lhs_bounds.min_y << ","
-                << lhs_bounds.max_x << ","
-                << lhs_bounds.max_y << ","
-                << lhs_bounds.min_z << ","
-                << lhs_bounds.max_z << ","
-                << rhs_bounds.min_x << ","
-                << rhs_bounds.min_y << ","
-                << rhs_bounds.max_x << ","
-                << rhs_bounds.max_y << ","
-                << rhs_bounds.min_z << ","
-                << rhs_bounds.max_z
-                << "\n";
+                << (EntityMustDrawBefore(lhs, rhs) ? 1 : 0) << ","
+                << (EntityMustDrawBefore(rhs, lhs) ? 1 : 0) << "\n";
         }
     }
 
@@ -5053,7 +3285,8 @@ int MyGLCanvas::HitTestTileSwapRegionResizeControl(const wxPoint& point) const {
         ScreenToWorldY(point.y)
     };
     const auto& region = regions[static_cast<std::size_t>(m_selected_tileswap_region_idx)];
-    if (PointInRect(world_point, TileSwapRegionResizeControlRect(region))) {
+    PickRect rect = RectAroundPoint(region.resize_handle, 6.0f);
+    if (PointInRect(world_point, rect)) {
         return 1;
     }
     return 0;
@@ -5087,80 +3320,7 @@ int MyGLCanvas::HitTestDoor(const wxPoint& point) const {
 }
 
 void MyGLCanvas::RenderTileSwapOutlines() {
-    auto regions = BuildTileSwapRegionGeometries(m_gd, m_current_room, m_mapRenderer, m_heightmapRenderer.GetZExtent());
-    if (regions.empty()) {
-        return;
-    }
-
-    glUseProgram(0);
-    glDisable(GL_TEXTURE_2D);
-    glDisable(GL_STENCIL_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    int hover_swap = -1;
-    if (m_hovered_tileswap_region_idx >= 0 && m_hovered_tileswap_region_idx < static_cast<int>(regions.size())) {
-        hover_swap = regions[static_cast<std::size_t>(m_hovered_tileswap_region_idx)].swap_index;
-    }
-
-    auto colour_for_part = [](TileSwapRegionPart part) {
-        switch (part) {
-            case TileSwapRegionPart::TilemapSource:
-                return std::array<float, 3>{0.15f, 0.45f, 1.0f};
-            case TileSwapRegionPart::TilemapDestination:
-                return std::array<float, 3>{1.0f, 0.15f, 0.15f};
-            case TileSwapRegionPart::HeightmapSource:
-                return std::array<float, 3>{0.75f, 0.25f, 1.0f};
-            case TileSwapRegionPart::HeightmapDestination:
-                return std::array<float, 3>{0.0f, 0.85f, 0.8f};
-        }
-        return std::array<float, 3>{1.0f, 1.0f, 1.0f};
-    };
-
-    for (const auto& region : regions) {
-        bool selected = region.flat_index == m_selected_tileswap_region_idx;
-        bool hovered_group = region.swap_index == hover_swap;
-        auto colour = colour_for_part(region.part);
-        float brighten = hovered_group || selected ? 1.2f : 1.0f;
-        glColor4f(
-            std::min(colour[0] * brighten, 1.0f),
-            std::min(colour[1] * brighten, 1.0f),
-            std::min(colour[2] * brighten, 1.0f),
-            hovered_group || selected ? 1.0f : 0.8f);
-        glLineWidth(selected ? 4.0f : (hovered_group ? 2.5f : 1.5f));
-        if (m_tileswap_preview_active && region.segments) {
-            DrawSegments(region.points);
-        } else if (m_tileswap_preview_active) {
-            DrawClosedPolyline(region.points);
-        } else if (region.segments) {
-            DrawDashedSegments(region.points, selected ? 10.0f : 8.0f, selected ? 3.0f : 5.0f);
-        } else {
-            DrawDashedClosedPolyline(region.points, selected ? 10.0f : 8.0f, selected ? 3.0f : 5.0f);
-        }
-
-        if (selected) {
-            PickRect rect = TileSwapRegionResizeControlRect(region);
-            glColor4f(0.02f, 0.02f, 0.025f, 0.68f);
-            glBegin(GL_QUADS);
-            glVertex2f(rect.min_x, rect.min_y);
-            glVertex2f(rect.max_x, rect.min_y);
-            glVertex2f(rect.max_x, rect.max_y);
-            glVertex2f(rect.min_x, rect.max_y);
-            glEnd();
-
-            glColor4f(1.0f, 0.95f, 0.2f, 0.95f);
-            glLineWidth(2.0f);
-            glBegin(GL_LINE_LOOP);
-            glVertex2f(rect.min_x, rect.min_y);
-            glVertex2f(rect.max_x, rect.min_y);
-            glVertex2f(rect.max_x, rect.max_y);
-            glVertex2f(rect.min_x, rect.max_y);
-            glEnd();
-        }
-    }
-
-    glLineWidth(1.0f);
-    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    GLCanvasTileDoorEditor(*this).RenderTileSwapOutlines();
 }
 
 void MyGLCanvas::RenderDoors() {
@@ -5252,7 +3412,8 @@ void MyGLCanvas::OnPaint(wxPaintEvent&) {
     m_selected_entity_idx = selected_entity_id != 0 ? FindInstanceIndex(selected_entity_id) : -1;
     m_hovered_entity_idx = hovered_entity_id != 0 ? FindInstanceIndex(hovered_entity_id) : -1;
 
-    // Delegate the actual drawing to specialized renderer classes
+    // Delegate drawing in strict layer order to keep occlusion deterministic.
+    // Earlier passes also prepare stencil information used by later passes.
     // 1. Draw the isometric map background and foreground
     m_mapRenderer.Render(m_cam_x, m_cam_y);
     // 2. Draw the heightmap overlay when enabled
@@ -5279,6 +3440,10 @@ void MyGLCanvas::OnPaint(wxPaintEvent&) {
             occlusion_mode = SpriteRenderer::OcclusionMode::AlwaysOnTop;
             break;
     }
+    // Stencil convention used by sprite rendering:
+    // bit 0x01: occluded by heightmap geometry
+    // bit 0x04: covered by foreground-priority map tiles
+    // When heightmap is hidden we test both (0x05) so sprites still clip behind FG.
     const GLint sprite_occlusion_ref = m_show_heightmap ? 0x01 : 0x05;
     const GLint sprite_occlusion_mask = m_show_heightmap ? 0x01 : 0x05;
     std::set<uint32_t> collided_entities = FindCollidedEntities(m_instances);

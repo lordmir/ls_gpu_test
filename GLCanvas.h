@@ -39,6 +39,11 @@ public:
     void LoadRoom(uint16_t roomnum);
 
 private:
+    friend class GLCanvasEntityEditor;
+    friend class GLCanvasWarpEditor;
+    friend class GLCanvasTileDoorEditor;
+    friend class GLCanvasObjectCoordinator;
+
     void OnTimer(wxTimerEvent& evt);
     void OnKeyDown(wxKeyEvent& evt);
     void OnMouseMove(wxMouseEvent& evt);
