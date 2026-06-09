@@ -7,24 +7,6 @@
 #include <filesystem>
 #include <vector>
 
-namespace {
-
-void PreferX11BackendForGlew()
-{
-#if defined(__linux__)
-    const char* display = std::getenv("DISPLAY");
-    const char* session_type = std::getenv("XDG_SESSION_TYPE");
-    if (!display || display[0] == '\0' || !session_type || std::strcmp(session_type, "wayland") != 0) {
-        return;
-    }
-
-    setenv("GDK_BACKEND", "x11", 1);
-    setenv("XDG_SESSION_TYPE", "x11", 1);
-    unsetenv("WAYLAND_DISPLAY");
-#endif
-}
-
-}
 
 class MyApp : public wxApp {
 public:
@@ -52,10 +34,29 @@ public:
     }
 };
 
+#ifdef __linux__
+// This is needed to work around a GLEW issue where it fails to initialize properly on Wayland sessions.
 wxIMPLEMENT_APP_NO_MAIN(MyApp);
+
+void PreferX11BackendForGlew()
+{
+    const char* display = std::getenv("DISPLAY");
+    const char* session_type = std::getenv("XDG_SESSION_TYPE");
+    if (!display || display[0] == '\0' || !session_type || std::strcmp(session_type, "wayland") != 0) {
+        return;
+    }
+
+    setenv("GDK_BACKEND", "x11", 1);
+    setenv("XDG_SESSION_TYPE", "x11", 1);
+    unsetenv("WAYLAND_DISPLAY");
+}
 
 int main(int argc, char** argv)
 {
     PreferX11BackendForGlew();
     return wxEntry(argc, argv);
 }
+
+#else
+wxIMPLEMENT_APP(MyApp);
+#endif
