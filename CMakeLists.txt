@@ -45,6 +45,7 @@ target_link_libraries(gpu_demo PRIVATE
     wx::gl
     OpenGL::GL
     GLEW::GLEW
+    yaml-cpp::yaml-cpp
     landstalker
 )
 
