@@ -4,7 +4,9 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <chrono>
 #include <landstalker/main/GameData.h>
+#include <landstalker/3d_maps/Tilemap3D.h>
 
 #ifdef __WXMSW__
 #include <windows.h>
@@ -20,7 +22,12 @@ public:
 
     void Init();
     void LoadRoom(uint16_t roomnum);
-    void Render(float cam_x, float cam_y, bool show_heightmap);
+    void LoadPreviewRoom(uint16_t roomnum, const Landstalker::Tilemap3D& map);
+    void Render(float cam_x, float cam_y);
+    void BuildForegroundCoverageStencil();
+    void WriteForegroundPriorityDebugLog(const char* path, float screen_min_x, float screen_min_y, float screen_max_x, float screen_max_y) const;
+    void SetBackgroundOpacity(float opacity) { m_bg_opacity = opacity; }
+    void SetForegroundOpacity(float opacity) { m_fg_opacity = opacity; }
 
     int GetRoomWidth() const { return m_room_w; }
     int GetRoomHeight() const { return m_room_h; }
@@ -28,6 +35,7 @@ public:
     int GetRoomTop() const { return m_room_top; }
 
 private:
+    void UploadRoomMap(uint16_t roomnum, const Landstalker::Tilemap3D& map);
     void InitShaders();
     GLuint CreateShader(const std::string& vs_path, const std::string& fs_path);
     std::string LoadShaderFile(const std::string& path);
@@ -39,9 +47,15 @@ private:
     GLuint m_blockset_tex_id;
     GLuint m_tileset_tex_id;
     GLuint m_room_pal_tex_id;
+    GLuint m_anim_meta_tex_id;
+    GLuint m_anim_meta2_tex_id;
+    int m_tileset_tex_rows;
+    std::chrono::steady_clock::time_point m_start_time;
 
     int m_room_w, m_room_h, m_room_left, m_room_top;
     uint16_t m_current_room;
+    float m_bg_opacity;
+    float m_fg_opacity;
 };
 
 #endif // MAP_RENDERER_H

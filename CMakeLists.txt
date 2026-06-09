@@ -23,6 +23,7 @@ set(SOURCES
     MainFrame.cpp
     GLCanvas.cpp
     MapRenderer.cpp
+    HeightmapRenderer.cpp
     SpriteRenderer.cpp
     GLLoader.cpp
 )
@@ -51,3 +52,8 @@ endif()
 
 # Copy shaders to build directory
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/shaders DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+add_custom_command(TARGET gpu_demo POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders
+        $<TARGET_FILE_DIR:gpu_demo>/shaders
+)
