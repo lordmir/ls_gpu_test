@@ -101,6 +101,66 @@ Reusable algorithms shared across translation units:
 
 This avoids duplicating math/geometry behavior in multiple editor files.
 
+## Editor Modes
+
+Mode handling is now split into dedicated files:
+
+- `GLCanvasRoomMode.cpp/.h`
+- `GLCanvasLayerEditMode.cpp/.h`
+- `GLCanvasHeightmapMode.cpp/.h`
+
+`MyGLCanvas` remains the event source, but delegates mode-specific key/mouse/render behavior to these classes.
+
+### Mode Selection
+
+- `1`: Room mode
+- `2`: Heightmap edit mode
+- `3`: Background layer edit mode
+- `4`: Foreground layer edit mode
+
+### Room Mode
+
+- Primary purpose: object editing (entities, warps, tile swaps, doors), selection cycling, room navigation, and camera controls.
+- Mouse:
+  - Left click/drag selects and manipulates objects.
+  - Right click performs quick object actions (warp follow, preview toggles, Z drag shortcuts).
+- Keyboard:
+  - Object operations and transforms (insert/delete, reorder, nudge, resize/rotate, palette/orientation changes).
+  - Rendering toggles (heightmap visibility, opacity modes, occlusion debug).
+
+### Background/Foreground Layer Modes
+
+- Primary purpose: tile block painting/copy/paste with cell-accurate selection.
+- Mouse:
+  - Move updates selected tile under cursor.
+  - Left click paints selected cell from clipboard.
+  - Right click copies selected cell into clipboard.
+- Keyboard:
+  - `W/A/S/D` move selection.
+  - `C` copy selected block, `Space` paste block, `Esc` clear clipboard.
+  - `I` toggles tile ID overlay.
+  - `B` toggles BG underlay while in FG mode.
+
+### Heightmap Mode
+
+- Primary purpose: edit heightmap cells using the same copy/paste cursor workflow as layer editing.
+- Mouse:
+  - Move updates selected heightmap cell.
+  - Left click applies clipboard height value.
+  - Right click copies current cell height value.
+- Keyboard:
+  - `W/A/S/D` move selection.
+  - `C` copy selected height cell, `Space` paste, `Esc` clear clipboard.
+  - `Shift+1..4` chooses heightmap preview preset:
+    - `1`: flat
+    - `2`: raised
+    - `3`: full
+    - `4`: full + tilemap underlay
+
+### Status Bar Update Frequency
+
+The status text is now refreshed continuously from the timer loop (rather than only once per FPS sample), and also updated immediately after mode/input actions. This keeps mode, cursor, camera, and render flags in sync while editing.
+
 ## Rendering and Edit Flow
 
 1. `LoadRoom(...)` populates runtime vectors and renderer state from `GameData`.

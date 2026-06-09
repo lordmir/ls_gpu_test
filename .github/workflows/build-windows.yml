@@ -1,0 +1,39 @@
+name: build-windows
+
+on:
+  push:
+  release:
+    types: [published]
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  build:
+    name: Windows (Visual Studio)
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+    steps:
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: 3.30.x
+
+      - name: Checkout sources
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: cmake -S . -B build -DINSTALL_DEPS=ON
+
+      - name: Build (Release)
+        run: cmake --build build --config Release -j8
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu_demo_windows
+          path: |
+            build/Release/gpu_demo.exe
+            build/gpu_demo.exe

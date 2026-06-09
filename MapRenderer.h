@@ -7,13 +7,7 @@
 #include <chrono>
 #include <landstalker/main/GameData.h>
 #include <landstalker/3d_maps/Tilemap3D.h>
-
-#ifdef __WXMSW__
-#include <windows.h>
-#include <GL/gl.h>
-#else
-#include <GL/gl.h>
-#endif
+#include "GLLoader.h"
 
 class MapRenderer {
 public:
@@ -24,6 +18,11 @@ public:
     void LoadRoom(uint16_t roomnum);
     void LoadPreviewRoom(uint16_t roomnum, const Landstalker::Tilemap3D& map);
     void Render(float cam_x, float cam_y);
+    void RenderBackgroundOnly();
+    void RenderBackgroundWithOpacity(float alpha);
+    void RenderForegroundOnly();
+    void RenderForegroundWithOpacity(float alpha);
+    void RenderBlockGhost(uint16_t block_id, int block_x, int block_y, float alpha, Landstalker::Tilemap3D::Layer layer);
     void BuildForegroundCoverageStencil();
     void WriteForegroundPriorityDebugLog(const char* path, float screen_min_x, float screen_min_y, float screen_max_x, float screen_max_y) const;
     void SetBackgroundOpacity(float opacity) { m_bg_opacity = opacity; }
@@ -49,6 +48,7 @@ private:
     GLuint m_room_pal_tex_id;
     GLuint m_anim_meta_tex_id;
     GLuint m_anim_meta2_tex_id;
+    GLuint m_editor_preview_map_tex_id;
     int m_tileset_tex_rows;
     std::chrono::steady_clock::time_point m_start_time;
 

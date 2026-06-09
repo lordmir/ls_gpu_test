@@ -8,13 +8,7 @@
 #include <functional>
 #include <landstalker/main/GameData.h>
 #include "SpriteInstance.h"
-
-#ifdef __WXMSW__
-#include <windows.h>
-#include <GL/gl.h>
-#else
-#include <GL/gl.h>
-#endif
+#include "GLLoader.h"
 
 class SpriteRenderer {
 public:

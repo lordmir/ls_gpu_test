@@ -1,6 +1,7 @@
 #include "MapRenderer.h"
 #include "GLLoader.h"
 #include <landstalker/main/GameData.h>
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -12,7 +13,7 @@ using namespace Landstalker;
 MapRenderer::MapRenderer(std::shared_ptr<GameData> gd)
     : m_gd(gd), m_map_shader_program(0), m_map_tex_id(0), m_fg_map_tex_id(0),
       m_blockset_tex_id(0), m_tileset_tex_id(0), m_room_pal_tex_id(0),
-      m_anim_meta_tex_id(0), m_anim_meta2_tex_id(0), m_tileset_tex_rows(0),
+    m_anim_meta_tex_id(0), m_anim_meta2_tex_id(0), m_editor_preview_map_tex_id(0), m_tileset_tex_rows(0),
       m_start_time(std::chrono::steady_clock::now()),
       m_room_w(0), m_room_h(0), m_room_left(0), m_room_top(0), m_current_room(0),
       m_bg_opacity(1.0f), m_fg_opacity(1.0f)
@@ -27,6 +28,7 @@ MapRenderer::~MapRenderer() {
     if (m_anim_meta_tex_id) glDeleteTextures(1, &m_anim_meta_tex_id);
     if (m_anim_meta2_tex_id) glDeleteTextures(1, &m_anim_meta2_tex_id);
     if (m_room_pal_tex_id) glDeleteTextures(1, &m_room_pal_tex_id);
+    if (m_editor_preview_map_tex_id) glDeleteTextures(1, &m_editor_preview_map_tex_id);
 }
 
 void MapRenderer::Init() {
@@ -256,6 +258,172 @@ void MapRenderer::Render(float cam_x, float cam_y) {
 
         glUseProgram(0);
     }
+}
+
+void MapRenderer::RenderBackgroundOnly() {
+    RenderBackgroundWithOpacity(1.0f);
+}
+
+void MapRenderer::RenderBackgroundWithOpacity(float alpha) {
+    if (!m_map_tex_id || !m_map_shader_program) {
+        return;
+    }
+
+    float mat[9] = {
+        32.0f, 16.0f, 0.0f,
+       -32.0f, 16.0f, 0.0f,
+       512.0f, 100.0f, 1.0f
+    };
+
+    glUseProgram(m_map_shader_program);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_map_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_map"), 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_blockset_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_blockset"), 1);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_tileset_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_tileset"), 2);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_room_pal_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_palette"), 3);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, m_anim_meta_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_anim_metadata1"), 4);
+    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, m_anim_meta2_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_anim_metadata2"), 5);
+    glUniform2f(glGetUniformLocation(m_map_shader_program, "u_map_size"), (float)m_room_w, (float)m_room_h);
+    glUniform1i(glGetUniformLocation(m_map_shader_program, "u_tileset_height"), m_tileset_tex_rows);
+    glUniform1i(glGetUniformLocation(m_map_shader_program, "u_require_priority"), 0);
+    {
+        auto now = std::chrono::steady_clock::now();
+        std::chrono::duration<float> dt = now - m_start_time;
+        glUniform1f(glGetUniformLocation(m_map_shader_program, "u_time"), dt.count());
+    }
+    glUniform1i(glGetUniformLocation(m_map_shader_program, "u_num_tiles"), (int)(m_gd->GetRoomData()->GetTilesetForRoom(m_current_room)->GetData()->GetTileCount()));
+    glUniform1i(glGetUniformLocation(m_map_shader_program, "u_num_blocks"), (int)(m_gd->GetRoomData()->GetCombinedBlocksetForRoom(m_current_room)->size()));
+    glUniform1f(glGetUniformLocation(m_map_shader_program, "u_alpha"), std::clamp(alpha, 0.0f, 1.0f));
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glBegin(GL_QUADS);
+    for (int y = 0; y < m_room_h; ++y) {
+        for (int x = 0; x < m_room_w; ++x) {
+            float px = mat[0] * x + mat[3] * y + mat[6];
+            float py = mat[1] * x + mat[4] * y + mat[7];
+            glTexCoord2f((float)x, (float)y); glVertex2f(px, py);
+            glTexCoord2f((float)x + 1.0f, (float)y); glVertex2f(px + 32.0f, py);
+            glTexCoord2f((float)x + 1.0f, (float)y + 1.0f); glVertex2f(px + 32.0f, py + 32.0f);
+            glTexCoord2f((float)x, (float)y + 1.0f); glVertex2f(px, py + 32.0f);
+        }
+    }
+    glEnd();
+
+    glUseProgram(0);
+}
+
+void MapRenderer::RenderForegroundOnly() {
+    RenderForegroundWithOpacity(1.0f);
+}
+
+void MapRenderer::RenderForegroundWithOpacity(float alpha) {
+    if (!m_fg_map_tex_id || !m_map_shader_program) {
+        return;
+    }
+
+    float mat[9] = {
+        32.0f, 16.0f, 0.0f,
+       -32.0f, 16.0f, 0.0f,
+       512.0f, 100.0f, 1.0f
+    };
+
+    glUseProgram(m_map_shader_program);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_fg_map_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_map"), 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_blockset_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_blockset"), 1);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_tileset_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_tileset"), 2);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_room_pal_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_palette"), 3);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, m_anim_meta_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_anim_metadata1"), 4);
+    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, m_anim_meta2_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_anim_metadata2"), 5);
+    glUniform2f(glGetUniformLocation(m_map_shader_program, "u_map_size"), (float)m_room_w, (float)m_room_h);
+    glUniform1i(glGetUniformLocation(m_map_shader_program, "u_tileset_height"), m_tileset_tex_rows);
+    glUniform1i(glGetUniformLocation(m_map_shader_program, "u_require_priority"), 0);
+    {
+        auto now = std::chrono::steady_clock::now();
+        std::chrono::duration<float> dt = now - m_start_time;
+        glUniform1f(glGetUniformLocation(m_map_shader_program, "u_time"), dt.count());
+    }
+    glUniform1i(glGetUniformLocation(m_map_shader_program, "u_num_tiles"), (int)(m_gd->GetRoomData()->GetTilesetForRoom(m_current_room)->GetData()->GetTileCount()));
+    glUniform1i(glGetUniformLocation(m_map_shader_program, "u_num_blocks"), (int)(m_gd->GetRoomData()->GetCombinedBlocksetForRoom(m_current_room)->size()));
+    glUniform1f(glGetUniformLocation(m_map_shader_program, "u_alpha"), std::clamp(alpha, 0.0f, 1.0f));
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glBegin(GL_QUADS);
+    for (int y = 0; y < m_room_h; ++y) {
+        for (int x = 0; x < m_room_w; ++x) {
+            float px = mat[0] * x + mat[3] * y + mat[6] - 32.0f;
+            float py = mat[1] * x + mat[4] * y + mat[7];
+            glTexCoord2f((float)x, (float)y); glVertex2f(px, py);
+            glTexCoord2f((float)x + 1.0f, (float)y); glVertex2f(px + 32.0f, py);
+            glTexCoord2f((float)x + 1.0f, (float)y + 1.0f); glVertex2f(px + 32.0f, py + 32.0f);
+            glTexCoord2f((float)x, (float)y + 1.0f); glVertex2f(px, py + 32.0f);
+        }
+    }
+    glEnd();
+
+    glUseProgram(0);
+}
+
+void MapRenderer::RenderBlockGhost(uint16_t block_id, int block_x, int block_y, float alpha, Tilemap3D::Layer layer) {
+    if (!m_map_shader_program || block_x < 0 || block_y < 0 || block_x >= m_room_w || block_y >= m_room_h) {
+        return;
+    }
+
+    if (!m_editor_preview_map_tex_id) {
+        glGenTextures(1, &m_editor_preview_map_tex_id);
+    }
+
+    uint8_t preview_rgba[4] = {
+        static_cast<uint8_t>(block_id & 0xFF),
+        static_cast<uint8_t>((block_id >> 8) & 0xFF),
+        0,
+        0
+    };
+    glBindTexture(GL_TEXTURE_2D, m_editor_preview_map_tex_id);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, preview_rgba);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    float mat[9] = {
+        32.0f, 16.0f, 0.0f,
+       -32.0f, 16.0f, 0.0f,
+       512.0f, 100.0f, 1.0f
+    };
+    float layer_x_offset = layer == Tilemap3D::Layer::FG ? -32.0f : 0.0f;
+    float px = mat[0] * block_x + mat[3] * block_y + mat[6] + layer_x_offset;
+    float py = mat[1] * block_x + mat[4] * block_y + mat[7];
+
+    glUseProgram(m_map_shader_program);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_editor_preview_map_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_map"), 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_blockset_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_blockset"), 1);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_tileset_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_tileset"), 2);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_room_pal_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_palette"), 3);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, m_anim_meta_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_anim_metadata1"), 4);
+    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, m_anim_meta2_tex_id); glUniform1i(glGetUniformLocation(m_map_shader_program, "u_anim_metadata2"), 5);
+    glUniform2f(glGetUniformLocation(m_map_shader_program, "u_map_size"), 1.0f, 1.0f);
+    glUniform1i(glGetUniformLocation(m_map_shader_program, "u_tileset_height"), m_tileset_tex_rows);
+    glUniform1i(glGetUniformLocation(m_map_shader_program, "u_require_priority"), 0);
+    {
+        auto now = std::chrono::steady_clock::now();
+        std::chrono::duration<float> dt = now - m_start_time;
+        glUniform1f(glGetUniformLocation(m_map_shader_program, "u_time"), dt.count());
+    }
+    glUniform1i(glGetUniformLocation(m_map_shader_program, "u_num_tiles"), (int)(m_gd->GetRoomData()->GetTilesetForRoom(m_current_room)->GetData()->GetTileCount()));
+    glUniform1i(glGetUniformLocation(m_map_shader_program, "u_num_blocks"), (int)(m_gd->GetRoomData()->GetCombinedBlocksetForRoom(m_current_room)->size()));
+    glUniform1f(glGetUniformLocation(m_map_shader_program, "u_alpha"), alpha);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glBegin(GL_QUADS);
+    glTexCoord2f(0.0f, 0.0f); glVertex2f(px, py);
+    glTexCoord2f(1.0f, 0.0f); glVertex2f(px + 32.0f, py);
+    glTexCoord2f(1.0f, 1.0f); glVertex2f(px + 32.0f, py + 32.0f);
+    glTexCoord2f(0.0f, 1.0f); glVertex2f(px, py + 32.0f);
+    glEnd();
+
+    glUseProgram(0);
 }
 
 void MapRenderer::BuildForegroundCoverageStencil() {

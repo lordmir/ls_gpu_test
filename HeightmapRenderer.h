@@ -5,13 +5,7 @@
 #include <memory>
 #include <landstalker/main/GameData.h>
 #include <landstalker/3d_maps/Tilemap3D.h>
-
-#ifdef __WXMSW__
-#include <windows.h>
-#include <GL/gl.h>
-#else
-#include <GL/gl.h>
-#endif
+#include "GLLoader.h"
 
 class HeightmapRenderer {
 public:
@@ -56,6 +50,9 @@ public:
         float entity_top_z) const;
     void SetHoverPoint(float x, float y);
     void ClearHover();
+    int GetHoverX() const { return m_hover_x; }
+    int GetHoverY() const { return m_hover_y; }
+    void SetZExtent(float value);
     void AdjustZExtent(float delta);
     float GetZExtent() const { return m_z_extent; }
 

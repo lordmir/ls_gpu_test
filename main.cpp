@@ -2,8 +2,29 @@
 #include <landstalker/main/GameData.h>
 #include <landstalker/misc/Labels.h>
 #include "MainFrame.h"
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <vector>
+
+namespace {
+
+void PreferX11BackendForGlew()
+{
+#if defined(__linux__)
+    const char* display = std::getenv("DISPLAY");
+    const char* session_type = std::getenv("XDG_SESSION_TYPE");
+    if (!display || display[0] == '\0' || !session_type || std::strcmp(session_type, "wayland") != 0) {
+        return;
+    }
+
+    setenv("GDK_BACKEND", "x11", 1);
+    setenv("XDG_SESSION_TYPE", "x11", 1);
+    unsetenv("WAYLAND_DISPLAY");
+#endif
+}
+
+}
 
 class MyApp : public wxApp {
 public:
@@ -31,4 +52,10 @@ public:
     }
 };
 
-wxIMPLEMENT_APP(MyApp);
+wxIMPLEMENT_APP_NO_MAIN(MyApp);
+
+int main(int argc, char** argv)
+{
+    PreferX11BackendForGlew();
+    return wxEntry(argc, argv);
+}

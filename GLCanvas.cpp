@@ -83,7 +83,7 @@ float OpacityForIndex(int idx) {
     return opacities[idx % 3];
 }
 
-constexpr std::array<float, 3> kZoomSteps = {0.5f, 1.0f, 2.0f};
+constexpr std::array<float, 5> kZoomSteps = {0.5f, 1.0f, 2.0f, 3.0f, 4.0f};
 
 const char* OcclusionModeName(int idx) {
     static constexpr const char* names[] = {"TOP", "GHOST", "HIDE"};
@@ -1007,12 +1007,16 @@ void DrawOverlayText(const std::string& text, float x, float y, float scale)
         DrawOverlayGlyph(text[i], x + float(i) * glyph_advance * scale, y, scale);
     }
 }
+
 }
 
 #include "GLCanvasEntityEditor.h"
 #include "GLCanvasWarpEditor.h"
 #include "GLCanvasTileDoorEditor.h"
 #include "GLCanvasObjectCoordinator.h"
+#include "GLCanvasHeightmapMode.h"
+#include "GLCanvasLayerEditMode.h"
+#include "GLCanvasRoomMode.h"
 
 wxBEGIN_EVENT_TABLE(MyGLCanvas, wxGLCanvas)
     EVT_PAINT(MyGLCanvas::OnPaint)
@@ -1032,7 +1036,7 @@ wxEND_EVENT_TABLE()
 
 MyGLCanvas::MyGLCanvas(wxWindow* parent, std::shared_ptr<GameData> gd)
     : wxGLCanvas(parent, wxID_ANY, GLCanvasAttributes, wxDefaultPosition, wxDefaultSize, wxFULL_REPAINT_ON_RESIZE),
-      m_gd(gd), m_mapRenderer(gd), m_heightmapRenderer(gd), m_spriteRenderer(gd),
+    m_gd(gd), m_context(nullptr), m_mapRenderer(gd), m_heightmapRenderer(gd), m_spriteRenderer(gd),
       m_frame_count(0), m_fps(0.0f), m_current_room(0), m_cam_x(0.0f), m_cam_y(0.0f), m_show_heightmap(false),
       m_hovered_entity_idx(-1), m_selected_entity_idx(-1), m_hovered_warp_idx(-1), m_selected_warp_idx(-1),
       m_hovered_tileswap_region_idx(-1), m_selected_tileswap_region_idx(-1),
@@ -1047,20 +1051,18 @@ MyGLCanvas::MyGLCanvas(wxWindow* parent, std::shared_ptr<GameData> gd)
       m_dragging_tileswap_region(false), m_drag_tileswap_region_idx(-1), m_drag_tileswap_resize_axis(0),
       m_drag_tileswap_start_x(0), m_drag_tileswap_start_y(0), m_drag_tileswap_start_width(1), m_drag_tileswap_start_height(1),
     m_dragging_pan(false), m_drag_pan_start_mouse(wxDefaultPosition), m_drag_pan_start_cam_x(0.0f), m_drag_pan_start_cam_y(0.0f),
-      m_bg_opacity_idx(0), m_fg_opacity_idx(0), m_sprite_opacity_idx(0), m_entity_occlusion_idx(1),
-      m_debug_occlusion(false), m_show_hitboxes(true), m_tileswap_preview_active(false), m_tileswap_preview_swap_index(-1),
+    m_bg_opacity_idx(0), m_fg_opacity_idx(0), m_sprite_opacity_idx(0), m_entity_occlusion_idx(1),
+        m_debug_occlusion(false), m_show_hitboxes(true), m_editor_mode(EditorMode::Room), m_heightmap_view_mode(HeightmapViewMode::Flat), m_non_heightmap_z_extent(32.0f), m_foreground_show_background_underlay(true), m_background_show_block_ids(false),
+            m_background_has_selection(false), m_background_selected_x(0), m_background_selected_y(0),
+            m_background_clipboard_valid(false), m_background_clipboard_block_id(0),
+            m_tileswap_preview_active(false), m_tileswap_preview_swap_index(-1),
       m_door_preview_active(false), m_door_preview_idx(-1),
       m_timer(this), m_pending_warp_half(false), m_pending_warp_room(0xFFFF), m_pending_warp_instance_id(0),
-    m_entity_clipboard_valid(false), m_zoom_step_idx(2), m_initialized(false), m_last_mouse_pos(wxDefaultPosition)
+    m_entity_clipboard_valid(false), m_zoom_step_idx(1), m_gl_init_failed(false), m_initialized(false), m_last_mouse_pos(wxDefaultPosition)
 {
-    m_context = new wxGLContext(this);
-    SetCurrent(*m_context);
-    InitGLLoader();
-
     m_current_room = 630;
     m_fps_stopwatch.Start();
-    // Drive the paint loop at a higher cadence (~120 Hz target).
-    m_timer.Start(8);
+    m_timer.Start(1000.0 / 60.0);
 }
 
 MyGLCanvas::~MyGLCanvas() {
@@ -1193,7 +1195,84 @@ void MyGLCanvas::LoadRoom(uint16_t roomnum) {
 
     SortEntitiesGeometrically(m_instances);
     CenterCameraOnRoom();
+    ClampBackgroundSelection();
     m_room_stopwatch.Start();
+    UpdateStatusBar();
+}
+
+void MyGLCanvas::PanCameraByStep(int dx, int dy, float speed) {
+    m_cam_x += speed * static_cast<float>(dx);
+    m_cam_y += speed * static_cast<float>(dy);
+}
+
+void MyGLCanvas::ChangeZoomStep(int delta, float anchor_x, float anchor_y) {
+    int old_idx = std::clamp(m_zoom_step_idx, 0, static_cast<int>(kZoomSteps.size()) - 1);
+    int new_idx = std::clamp(old_idx + delta, 0, static_cast<int>(kZoomSteps.size()) - 1);
+    if (new_idx == old_idx) {
+        return;
+    }
+    float old_zoom = kZoomSteps[static_cast<std::size_t>(old_idx)];
+    float new_zoom = kZoomSteps[static_cast<std::size_t>(new_idx)];
+    float world_x = (anchor_x - m_cam_x) / old_zoom;
+    float world_y = (anchor_y - m_cam_y) / old_zoom;
+    m_zoom_step_idx = new_idx;
+    m_cam_x = anchor_x - world_x * new_zoom;
+    m_cam_y = anchor_y - world_y * new_zoom;
+    m_cam_x = std::round(m_cam_x);
+    m_cam_y = std::round(m_cam_y);
+}
+
+void MyGLCanvas::ResizeSelectedTileSwapByDelta(int dw, int dh) {
+    auto regions = BuildTileSwapRegionGeometries(m_gd, m_current_room, m_mapRenderer, m_heightmapRenderer.GetZExtent());
+    if (m_selected_tileswap_region_idx < 0 ||
+        m_selected_tileswap_region_idx >= static_cast<int>(regions.size())) {
+        return;
+    }
+    TileSwapRegionMetrics metrics = MetricsForTileSwapRegion(
+        regions[static_cast<std::size_t>(m_selected_tileswap_region_idx)].swap,
+        regions[static_cast<std::size_t>(m_selected_tileswap_region_idx)].part);
+    ResizeSelectedTileSwapRegion(
+        dw == 0 ? 0.0f : static_cast<float>(metrics.width + dw),
+        dh == 0 ? 0.0f : static_cast<float>(metrics.height + dh));
+}
+
+void MyGLCanvas::UpdateStatusBar() {
+    auto* f = wxDynamicCast(GetParent(), wxFrame);
+    if (!f) {
+        return;
+    }
+
+    auto name = m_gd->GetRoomData()->GetRoomDisplayName(m_current_room);
+    const char* mode_name = "ROOM";
+    if (m_editor_mode == EditorMode::BackgroundLayer) {
+        mode_name = "BG_EDIT";
+    } else if (m_editor_mode == EditorMode::ForegroundLayer) {
+        mode_name = "FG_EDIT";
+    } else if (m_editor_mode == EditorMode::Heightmap) {
+        mode_name = "HM_EDIT";
+    }
+
+    int cursor_x = -1;
+    int cursor_y = -1;
+    if (IsAnyEditMode() && m_background_has_selection) {
+        cursor_x = m_background_selected_x;
+        cursor_y = m_background_selected_y;
+    }
+
+    f->SetStatusText(wxString::Format("MODE: %s | CUR: %d,%d | FPS: %.2f | Entities: %zu | Room: %d (%ls) | Cam: %.0f, %.0f | HM: %s %.0f | BG: %.1f FG: %.1f SPR: %.1f OCC: %s DBG: %s BOX: %s",
+        mode_name, cursor_x, cursor_y,
+        m_fps, m_instances.size(), m_current_room, name.c_str(), m_cam_x, m_cam_y,
+        m_show_heightmap ? "ON" : "OFF", m_heightmapRenderer.GetZExtent(),
+        OpacityForIndex(m_bg_opacity_idx), OpacityForIndex(m_fg_opacity_idx), OpacityForIndex(m_sprite_opacity_idx),
+        OcclusionModeName(m_entity_occlusion_idx), m_debug_occlusion ? "ON" : "OFF", m_show_hitboxes ? "ON" : "OFF"));
+}
+
+void MyGLCanvas::RenderStencilOverlay(int width, int height, GLint ref, GLint mask, float r, float g, float b, float a) const {
+    DrawStencilOverlay(m_cam_x, m_cam_y, width, height, ref, mask, r, g, b, a);
+}
+
+std::set<uint32_t> MyGLCanvas::FindCollidedEntityIds() const {
+    return FindCollidedEntities(m_instances);
 }
 
 void MyGLCanvas::OnTimer(wxTimerEvent&) {
@@ -1224,328 +1303,23 @@ void MyGLCanvas::OnTimer(wxTimerEvent&) {
     }
     m_frame_count++;
     if (m_fps_stopwatch.Time() >= 1000) {
-        m_fps = (m_frame_count*1000.0f)/m_fps_stopwatch.Time(); m_frame_count=0; m_fps_stopwatch.Start();
-        auto* f = wxDynamicCast(GetParent(), wxFrame);
-        if(f) {
-            auto name = m_gd->GetRoomData()->GetRoomDisplayName(m_current_room);
-            f->SetStatusText(wxString::Format("FPS: %.2f | Entities: %zu | Room: %d (%ls) | Cam: %.0f, %.0f | HM: %s %.0f | BG: %.1f FG: %.1f SPR: %.1f OCC: %s DBG: %s BOX: %s", 
-                m_fps, m_instances.size(), m_current_room, name.c_str(), m_cam_x, m_cam_y,
-                m_show_heightmap ? "ON" : "OFF", m_heightmapRenderer.GetZExtent(),
-                OpacityForIndex(m_bg_opacity_idx), OpacityForIndex(m_fg_opacity_idx), OpacityForIndex(m_sprite_opacity_idx),
-                OcclusionModeName(m_entity_occlusion_idx), m_debug_occlusion ? "ON" : "OFF", m_show_hitboxes ? "ON" : "OFF"));
-        }
+        m_fps = (m_frame_count*1000.0f)/m_fps_stopwatch.Time();
+        m_frame_count = 0;
+        m_fps_stopwatch.Start();
     }
+    UpdateStatusBar();
     Refresh();
 }
 
 void MyGLCanvas::OnKeyDown(wxKeyEvent& evt) {
-    float speed = 20.0f;
-    uint16_t room_count = m_gd->GetRoomData()->GetRoomCount();
-    bool ctrl = evt.ControlDown();
-    bool shift = evt.ShiftDown();
-    bool alt = evt.AltDown();
-    auto resize_selected_tileswap = [this](int dw, int dh) {
-        auto regions = BuildTileSwapRegionGeometries(m_gd, m_current_room, m_mapRenderer, m_heightmapRenderer.GetZExtent());
-        if (m_selected_tileswap_region_idx < 0 ||
-            m_selected_tileswap_region_idx >= static_cast<int>(regions.size())) {
-            return;
-        }
-        TileSwapRegionMetrics metrics = MetricsForTileSwapRegion(
-            regions[static_cast<std::size_t>(m_selected_tileswap_region_idx)].swap,
-            regions[static_cast<std::size_t>(m_selected_tileswap_region_idx)].part);
-        ResizeSelectedTileSwapRegion(
-            dw == 0 ? 0.0f : static_cast<float>(metrics.width + dw),
-            dh == 0 ? 0.0f : static_cast<float>(metrics.height + dh));
-    };
-    auto change_zoom_step = [this](int delta, float anchor_x, float anchor_y) {
-        int old_idx = std::clamp(m_zoom_step_idx, 0, static_cast<int>(kZoomSteps.size()) - 1);
-        int new_idx = std::clamp(old_idx + delta, 0, static_cast<int>(kZoomSteps.size()) - 1);
-        if (new_idx == old_idx) {
-            return;
-        }
-        float old_zoom = kZoomSteps[static_cast<std::size_t>(old_idx)];
-        float new_zoom = kZoomSteps[static_cast<std::size_t>(new_idx)];
-        float world_x = (anchor_x - m_cam_x) / old_zoom;
-        float world_y = (anchor_y - m_cam_y) / old_zoom;
-        m_zoom_step_idx = new_idx;
-        m_cam_x = anchor_x - world_x * new_zoom;
-        m_cam_y = anchor_y - world_y * new_zoom;
-    };
-
-    int unicode_key = evt.GetUnicodeKey();
-    if (unicode_key == '[' || unicode_key == '{') {
-        if (m_selected_tileswap_region_idx >= 0) {
-            CycleSelectedTileSwapId(-1);
-        } else {
-            ReorderSelectedObject(-1);
-        }
-        Refresh();
-        return;
+    if (IsHeightmapEditMode()) {
+        GLCanvasHeightmapMode(*this).HandleKeyDown(evt);
+    } else if (IsLayerEditMode()) {
+        GLCanvasLayerEditMode(*this).HandleKeyDown(evt);
+    } else {
+        GLCanvasRoomMode(*this).HandleKeyDown(evt);
     }
-    if (unicode_key == ']' || unicode_key == '}') {
-        if (m_selected_tileswap_region_idx >= 0) {
-            CycleSelectedTileSwapId(1);
-        } else {
-            ReorderSelectedObject(1);
-        }
-        Refresh();
-        return;
-    }
-
-    switch(evt.GetKeyCode()) {
-        case WXK_F4:
-            if (alt) {
-                auto* f = wxDynamicCast(GetParent(), wxFrame);
-                if (f) {
-                    f->Close();
-                }
-            }
-            break;
-        case WXK_ESCAPE: {
-            m_selected_entity_idx = -1;
-            m_selected_warp_idx = -1;
-            m_selected_tileswap_region_idx = -1;
-            m_selected_door_idx = -1;
-            m_hovered_entity_idx = -1;
-            m_hovered_warp_idx = -1;
-            m_hovered_tileswap_region_idx = -1;
-            m_hovered_door_idx = -1;
-            break;
-        }
-        case WXK_LEFT: m_cam_x += speed; break;
-        case WXK_RIGHT: m_cam_x -= speed; break;
-        case WXK_UP: m_cam_y += speed; break;
-        case WXK_DOWN: m_cam_y -= speed; break;
-        case WXK_PAGEUP: LoadRoom((m_current_room + 1) % room_count); break;
-        case WXK_PAGEDOWN: LoadRoom(m_current_room > 0 ? m_current_room - 1 : room_count - 1); break;
-        case WXK_TAB:
-            SelectNextObject(ctrl ? -1 : 1);
-            break;
-        case WXK_SPACE:
-            if (m_selected_door_idx >= 0) {
-                ToggleSelectedDoorPreview();
-            } else {
-                ToggleSelectedTileSwapPreview();
-            }
-            break;
-        case 'c':
-        case 'C':
-            if (ctrl) {
-                CopySelectedEntity();
-            }
-            break;
-        case 'v':
-        case 'V':
-            if (ctrl) {
-                PasteEntity();
-            }
-            break;
-        case WXK_INSERT:
-            if (shift) {
-                AddWarpHalf();
-            } else if (ctrl) {
-                AddTileSwap();
-            } else if (alt) {
-                AddDoor();
-            } else {
-                AddEntity();
-            }
-            break;
-        case WXK_DELETE:
-            DeleteSelectedObject();
-            break;
-        case '[':
-        case '{':
-            if (m_selected_tileswap_region_idx >= 0) {
-                CycleSelectedTileSwapId(-1);
-            } else {
-                ReorderSelectedObject(-1);
-            }
-            break;
-        case ']':
-        case '}':
-            if (m_selected_tileswap_region_idx >= 0) {
-                CycleSelectedTileSwapId(1);
-            } else {
-                ReorderSelectedObject(1);
-            }
-            break;
-        case ',':
-        case '<':
-            if (m_selected_door_idx >= 0) {
-                CycleSelectedDoorSize(-1);
-            } else if (m_selected_tileswap_region_idx >= 0) {
-                CycleSelectedTileSwapShape(-1);
-            } else if (m_selected_warp_idx >= 0) {
-                CycleSelectedWarpType(-1);
-            } else {
-                CycleSelectedEntityId(-1);
-            }
-            break;
-        case '.':
-        case '>':
-            if (m_selected_door_idx >= 0) {
-                CycleSelectedDoorSize(1);
-            } else if (m_selected_tileswap_region_idx >= 0) {
-                CycleSelectedTileSwapShape(1);
-            } else if (m_selected_warp_idx >= 0) {
-                CycleSelectedWarpType(1);
-            } else {
-                CycleSelectedEntityId(1);
-            }
-            break;
-        case '+':
-        case '=':
-        case WXK_NUMPAD_ADD:
-            if (ctrl) {
-                int w = 0;
-                int h = 0;
-                GetClientSize(&w, &h);
-                change_zoom_step(1, float(w) * 0.5f, float(h) * 0.5f);
-            } else {
-                m_heightmapRenderer.AdjustZExtent(4.0f);
-                RefreshObjectPlacementsFromHeightmap();
-            }
-            break;
-        case '-':
-        case WXK_NUMPAD_SUBTRACT:
-            if (ctrl) {
-                int w = 0;
-                int h = 0;
-                GetClientSize(&w, &h);
-                change_zoom_step(-1, float(w) * 0.5f, float(h) * 0.5f);
-            } else {
-                m_heightmapRenderer.AdjustZExtent(-4.0f);
-                RefreshObjectPlacementsFromHeightmap();
-            }
-            break;
-        case 'b':
-        case 'B':
-            m_bg_opacity_idx = (m_bg_opacity_idx + 1) % 3;
-            m_mapRenderer.SetBackgroundOpacity(OpacityForIndex(m_bg_opacity_idx));
-            break;
-        case 'g':
-        case 'G':
-            m_fg_opacity_idx = (m_fg_opacity_idx + 1) % 3;
-            m_mapRenderer.SetForegroundOpacity(OpacityForIndex(m_fg_opacity_idx));
-            break;
-        case 'e':
-        case 'E':
-            m_sprite_opacity_idx = (m_sprite_opacity_idx + 1) % 3;
-            m_spriteRenderer.SetOpacity(OpacityForIndex(m_sprite_opacity_idx));
-            break;
-        case 'x':
-        case 'X':
-            if (ctrl) {
-                CutSelectedEntity();
-            } else {
-                m_show_hitboxes = !m_show_hitboxes;
-            }
-            break;
-        case 'w':
-        case 'W':
-            if (m_selected_tileswap_region_idx >= 0 && shift) {
-                resize_selected_tileswap(0, -1);
-            } else if (m_selected_tileswap_region_idx >= 0) {
-                NudgeSelectedObject(0.0f, -1.0f, 0.0f);
-            } else if (ctrl && m_selected_entity_idx >= 0) {
-                SetSelectedEntityOrientation(Landstalker::Orientation::NW);
-            } else if (shift && m_selected_warp_idx >= 0) {
-                ResizeSelectedWarp(0.0f, -1.0f);
-            } else if (ctrl && m_selected_warp_idx >= 0) {
-                RotateSelectedWarp(0.0f, -1.0f);
-            } else {
-                NudgeSelectedObject(0.0f, -1.0f, 0.0f);
-            }
-            break;
-        case 'a':
-        case 'A':
-            if (m_selected_tileswap_region_idx >= 0 && shift) {
-                resize_selected_tileswap(-1, 0);
-            } else if (m_selected_tileswap_region_idx >= 0) {
-                NudgeSelectedObject(-1.0f, 0.0f, 0.0f);
-            } else if (ctrl && m_selected_entity_idx >= 0) {
-                SetSelectedEntityOrientation(Landstalker::Orientation::SW);
-            } else if (shift && m_selected_warp_idx >= 0) {
-                ResizeSelectedWarp(-1.0f, 0.0f);
-            } else if (ctrl && m_selected_warp_idx >= 0) {
-                RotateSelectedWarp(-1.0f, 0.0f);
-            } else {
-                NudgeSelectedObject(-1.0f, 0.0f, 0.0f);
-            }
-            break;
-        case 's':
-        case 'S':
-            if (m_selected_tileswap_region_idx >= 0 && shift) {
-                resize_selected_tileswap(0, 1);
-            } else if (m_selected_tileswap_region_idx >= 0) {
-                NudgeSelectedObject(0.0f, 1.0f, 0.0f);
-            } else if (ctrl && m_selected_entity_idx >= 0) {
-                SetSelectedEntityOrientation(Landstalker::Orientation::SE);
-            } else if (shift && m_selected_warp_idx >= 0) {
-                ResizeSelectedWarp(0.0f, 1.0f);
-            } else if (ctrl && m_selected_warp_idx >= 0) {
-                RotateSelectedWarp(0.0f, 1.0f);
-            } else {
-                NudgeSelectedObject(0.0f, 1.0f, 0.0f);
-            }
-            break;
-        case 'd':
-        case 'D':
-            if (m_selected_tileswap_region_idx >= 0 && shift) {
-                resize_selected_tileswap(1, 0);
-            } else if (m_selected_tileswap_region_idx >= 0) {
-                NudgeSelectedObject(1.0f, 0.0f, 0.0f);
-            } else if (ctrl && m_selected_entity_idx >= 0) {
-                SetSelectedEntityOrientation(Landstalker::Orientation::NE);
-            } else if (shift && m_selected_warp_idx >= 0) {
-                ResizeSelectedWarp(1.0f, 0.0f);
-            } else if (ctrl && m_selected_warp_idx >= 0) {
-                RotateSelectedWarp(1.0f, 0.0f);
-            } else {
-                NudgeSelectedObject(1.0f, 0.0f, 0.0f);
-            }
-            break;
-        case 'r':
-        case 'R':
-            NudgeSelectedObject(0.0f, 0.0f, 0.5f);
-            break;
-        case 'f':
-        case 'F':
-            if (ctrl) {
-                SetSelectedEntityToFloor();
-            } else {
-                NudgeSelectedObject(0.0f, 0.0f, -0.5f);
-            }
-            break;
-        case 'h':
-        case 'H': m_show_heightmap = !m_show_heightmap; break;
-        case 'z':
-        case 'Z':
-            m_entity_occlusion_idx = (m_entity_occlusion_idx + 1) % 3;
-            break;
-        case 'o':
-        case 'O':
-            m_debug_occlusion = !m_debug_occlusion;
-            break;
-        case 'l':
-        case 'L':
-            if (m_selected_entity_idx >= 0 && m_selected_entity_idx < static_cast<int>(m_instances.size())) {
-                WriteSelectedEntityOcclusionDebugLog();
-            } else {
-                WriteEntityDrawOrderDebugLog();
-            }
-            break;
-        case 'p':
-        case 'P':
-            CycleSelectedEntityPalette();
-            break;
-        case 'q':
-        case 'Q':
-            WriteEntityDrawOrderDebugLog();
-            break;
-    }
-    Refresh();
+    UpdateStatusBar();
 }
 
 void MyGLCanvas::OnMouseWheel(wxMouseEvent& evt) {
@@ -1598,151 +1372,42 @@ void MyGLCanvas::OnMouseMove(wxMouseEvent& evt) {
     if (m_dragging_pan) {
         m_cam_x = m_drag_pan_start_cam_x + static_cast<float>(evt.GetPosition().x - m_drag_pan_start_mouse.x);
         m_cam_y = m_drag_pan_start_cam_y + static_cast<float>(evt.GetPosition().y - m_drag_pan_start_mouse.y);
+        UpdateStatusBar();
         Refresh();
         return;
     }
-    if (m_dragging_entity) {
-        UpdateEntityDrag(evt);
+    if (IsHeightmapEditMode()) {
+        GLCanvasHeightmapMode(*this).HandleMouseMove(evt);
+        UpdateStatusBar();
+        evt.Skip();
         return;
     }
-    if (m_dragging_warp) {
-        UpdateWarpDrag(evt);
-        return;
-    }
-    if (m_dragging_door) {
-        UpdateDoorDrag(evt);
-        return;
-    }
-    if (m_dragging_tileswap_region) {
-        UpdateTileSwapRegionDrag(evt);
-        return;
-    }
-
-    if (HitTestRoomInfoLink(evt.GetPosition()) >= 0) {
-        SetCursor(wxCursor(wxCURSOR_HAND));
+    if (IsLayerEditMode()) {
+        GLCanvasLayerEditMode(*this).HandleMouseMove(evt);
+        UpdateStatusBar();
         evt.Skip();
         return;
     }
 
-    m_heightmapRenderer.SetHoverPoint(
-        ScreenToWorldX(evt.GetPosition().x),
-        ScreenToWorldY(evt.GetPosition().y));
-
-    // Hit-tests run from most specific controls to broadest objects.
-    // This precedence avoids selecting underlying objects when a resize/z handle is on top.
-    int hovered_control = HitTestEntityZControl(evt.GetPosition());
-    int hovered_body = hovered_control >= 0 ? hovered_control : HitTestEntityBody(evt.GetPosition());
-    int hovered_warp_resize = hovered_body < 0 ? HitTestWarpResizeControl(evt.GetPosition()) : 0;
-    int hovered_warp = hovered_body < 0 && hovered_warp_resize == 0 ? HitTestWarp(evt.GetPosition()) : -1;
-    int hovered = hovered_body >= 0 || hovered_warp >= 0 || hovered_warp_resize != 0 ? hovered_body : HitTestEntity(evt.GetPosition());
-    int hovered_tileswap_resize = hovered < 0 && hovered_warp < 0 && hovered_warp_resize == 0
-        ? HitTestTileSwapRegionResizeControl(evt.GetPosition())
-        : 0;
-    int hovered_tileswap_region = hovered < 0 && hovered_warp < 0 && hovered_warp_resize == 0
-        && hovered_tileswap_resize == 0
-        ? HitTestTileSwapRegion(evt.GetPosition())
-        : -1;
-    int hovered_door = hovered < 0 && hovered_warp < 0 && hovered_warp_resize == 0
-        && hovered_tileswap_resize == 0 && hovered_tileswap_region < 0
-        ? HitTestDoor(evt.GetPosition())
-        : -1;
-    if (hovered != m_hovered_entity_idx || hovered_warp != m_hovered_warp_idx ||
-        hovered_tileswap_region != m_hovered_tileswap_region_idx || hovered_door != m_hovered_door_idx) {
-        m_hovered_entity_idx = hovered;
-        m_hovered_warp_idx = hovered_warp;
-        m_hovered_tileswap_region_idx = hovered_tileswap_region;
-        m_hovered_door_idx = hovered_door;
-    }
-    bool z_cursor = hovered_control >= 0 || (m_hovered_entity_idx >= 0 && evt.ControlDown());
-    if (z_cursor) {
-        SetCursor(wxCursor(wxCURSOR_SIZENS));
-    } else if (hovered_warp_resize == 1) {
-        SetCursor(wxCursor(wxCURSOR_SIZENWSE));
-    } else if (hovered_warp_resize == 2) {
-        SetCursor(wxCursor(wxCURSOR_SIZENESW));
-    } else if (hovered_tileswap_resize != 0) {
-        SetCursor(wxCursor(wxCURSOR_SIZENWSE));
-    } else {
-        SetCursor(wxCursor((m_hovered_entity_idx >= 0 || m_hovered_warp_idx >= 0 ||
-            m_hovered_tileswap_region_idx >= 0 || m_hovered_door_idx >= 0) ? wxCURSOR_HAND : wxCURSOR_ARROW));
-    }
-    Refresh();
+    GLCanvasRoomMode(*this).HandleMouseMove(evt);
+    UpdateStatusBar();
     evt.Skip();
 }
 
 void MyGLCanvas::OnLeftDown(wxMouseEvent& evt) {
     m_last_mouse_pos = evt.GetPosition();
-    int room_info_room = HitTestRoomInfoLink(evt.GetPosition());
-    if (room_info_room >= 0) {
-        LoadRoom(static_cast<uint16_t>(room_info_room));
-        Refresh();
+    if (IsHeightmapEditMode()) {
+        GLCanvasHeightmapMode(*this).HandleLeftDown(evt);
+        UpdateStatusBar();
         return;
     }
-
-    // Selection order mirrors hover order: control handles first, then object bodies,
-    // and finally canvas panning when nothing interactive is under the cursor.
-    int control_idx = HitTestEntityZControl(evt.GetPosition());
-    m_selected_entity_idx = control_idx >= 0 ? control_idx : HitTestEntityBody(evt.GetPosition());
-    if (m_selected_entity_idx >= 0) {
-        m_selected_warp_idx = -1;
-        m_selected_tileswap_region_idx = -1;
-        m_selected_door_idx = -1;
-        StartEntityDrag(m_selected_entity_idx, evt, control_idx >= 0 || evt.ControlDown());
-    } else {
-        int resize_axis = HitTestWarpResizeControl(evt.GetPosition());
-        if (resize_axis != 0 && m_selected_warp_idx >= 0) {
-            m_selected_tileswap_region_idx = -1;
-            m_selected_door_idx = -1;
-            StartWarpResizeDrag(m_selected_warp_idx, resize_axis, evt);
-            Refresh();
-            return;
-        }
-
-        m_selected_warp_idx = HitTestWarp(evt.GetPosition());
-        if (m_selected_warp_idx >= 0) {
-            m_selected_tileswap_region_idx = -1;
-            m_selected_door_idx = -1;
-            StartWarpDrag(m_selected_warp_idx, evt);
-        } else {
-            m_selected_entity_idx = HitTestEntity(evt.GetPosition());
-            if (m_selected_entity_idx >= 0) {
-                m_selected_warp_idx = -1;
-                m_selected_tileswap_region_idx = -1;
-                m_selected_door_idx = -1;
-                StartEntityDrag(m_selected_entity_idx, evt, evt.ControlDown(), true);
-            } else {
-                int tileswap_resize_axis = HitTestTileSwapRegionResizeControl(evt.GetPosition());
-                if (tileswap_resize_axis != 0 && m_selected_tileswap_region_idx >= 0) {
-                    m_selected_door_idx = -1;
-                    StartTileSwapRegionDrag(m_selected_tileswap_region_idx, tileswap_resize_axis, evt);
-                    Refresh();
-                    return;
-                }
-                m_selected_tileswap_region_idx = HitTestTileSwapRegion(evt.GetPosition());
-                m_hovered_tileswap_region_idx = m_selected_tileswap_region_idx;
-                if (m_selected_tileswap_region_idx >= 0) {
-                    m_selected_door_idx = -1;
-                    StartTileSwapRegionDrag(m_selected_tileswap_region_idx, 0, evt);
-                } else {
-                    m_selected_door_idx = HitTestDoor(evt.GetPosition());
-                    m_hovered_door_idx = m_selected_door_idx;
-                    if (m_selected_door_idx >= 0) {
-                        StartDoorDrag(m_selected_door_idx, evt);
-                    } else {
-                        m_dragging_pan = true;
-                        m_drag_pan_start_mouse = evt.GetPosition();
-                        m_drag_pan_start_cam_x = m_cam_x;
-                        m_drag_pan_start_cam_y = m_cam_y;
-                        SetCursor(wxCursor(wxCURSOR_SIZING));
-                        if (!HasCapture()) {
-                            CaptureMouse();
-                        }
-                    }
-                }
-            }
-        }
+    if (IsLayerEditMode()) {
+        GLCanvasLayerEditMode(*this).HandleLeftDown(evt);
+        UpdateStatusBar();
+        return;
     }
-    Refresh();
+    GLCanvasRoomMode(*this).HandleLeftDown(evt);
+    UpdateStatusBar();
 }
 
 void MyGLCanvas::OnLeftUp(wxMouseEvent& evt) {
@@ -1790,55 +1455,18 @@ void MyGLCanvas::OnMiddleUp(wxMouseEvent& evt) {
 
 void MyGLCanvas::OnRightDown(wxMouseEvent& evt) {
     m_last_mouse_pos = evt.GetPosition();
-    int room_info_room = HitTestRoomInfoLink(evt.GetPosition());
-    if (room_info_room >= 0) {
-        LoadRoom(static_cast<uint16_t>(room_info_room));
-        Refresh();
+    if (IsHeightmapEditMode()) {
+        GLCanvasHeightmapMode(*this).HandleRightDown(evt);
+        UpdateStatusBar();
         return;
     }
-
-    int warp_idx = HitTestWarp(evt.GetPosition());
-    if (warp_idx >= 0) {
-        m_selected_warp_idx = warp_idx;
-        m_selected_entity_idx = -1;
-        m_selected_tileswap_region_idx = -1;
-        m_selected_door_idx = -1;
-        LoadRoom(m_warps[static_cast<std::size_t>(warp_idx)].DestinationRoom());
-        Refresh();
+    if (IsLayerEditMode()) {
+        GLCanvasLayerEditMode(*this).HandleRightDown(evt);
+        UpdateStatusBar();
         return;
     }
-
-    m_selected_entity_idx = HitTestEntityBody(evt.GetPosition());
-    if (m_selected_entity_idx < 0) {
-        m_selected_entity_idx = HitTestEntity(evt.GetPosition());
-    }
-    if (m_selected_entity_idx >= 0) {
-        m_selected_warp_idx = -1;
-        m_selected_tileswap_region_idx = -1;
-        m_selected_door_idx = -1;
-        StartEntityDrag(m_selected_entity_idx, evt, true);
-    } else {
-        int tileswap_region = HitTestTileSwapRegion(evt.GetPosition());
-        if (tileswap_region >= 0) {
-            m_selected_entity_idx = -1;
-            m_selected_warp_idx = -1;
-            m_selected_tileswap_region_idx = tileswap_region;
-            m_selected_door_idx = -1;
-            m_hovered_tileswap_region_idx = tileswap_region;
-            ToggleSelectedTileSwapPreview();
-        } else {
-            int door_idx = HitTestDoor(evt.GetPosition());
-            if (door_idx >= 0) {
-                m_selected_entity_idx = -1;
-                m_selected_warp_idx = -1;
-                m_selected_tileswap_region_idx = -1;
-                m_selected_door_idx = door_idx;
-                m_hovered_door_idx = door_idx;
-                ToggleSelectedDoorPreview();
-            }
-        }
-    }
-    Refresh();
+    GLCanvasRoomMode(*this).HandleRightDown(evt);
+    UpdateStatusBar();
 }
 
 void MyGLCanvas::OnRightUp(wxMouseEvent& evt) {
@@ -1850,6 +1478,14 @@ void MyGLCanvas::OnRightUp(wxMouseEvent& evt) {
 
 void MyGLCanvas::OnMouseLeave(wxMouseEvent& evt) {
     if (m_dragging_entity || m_dragging_warp || m_dragging_door || m_dragging_tileswap_region || m_dragging_pan) {
+        evt.Skip();
+        return;
+    }
+
+    if (IsAnyEditMode()) {
+        m_heightmapRenderer.ClearHover();
+        SetCursor(wxCursor(wxCURSOR_ARROW));
+        Refresh();
         evt.Skip();
         return;
     }
@@ -1892,6 +1528,448 @@ void MyGLCanvas::StartEntityDrag(int entity_idx, const wxMouseEvent& evt, bool z
     if (!HasCapture()) {
         CaptureMouse();
     }
+}
+
+bool MyGLCanvas::IsLayerEditMode() const {
+    return m_editor_mode == EditorMode::BackgroundLayer || m_editor_mode == EditorMode::ForegroundLayer;
+}
+
+bool MyGLCanvas::IsHeightmapEditMode() const {
+    return m_editor_mode == EditorMode::Heightmap;
+}
+
+bool MyGLCanvas::IsAnyEditMode() const {
+    return IsLayerEditMode() || IsHeightmapEditMode();
+}
+
+Tilemap3D::Layer MyGLCanvas::CurrentEditLayer() const {
+    return m_editor_mode == EditorMode::ForegroundLayer ? Tilemap3D::Layer::FG : Tilemap3D::Layer::BG;
+}
+
+void MyGLCanvas::ApplyHeightmapViewMode() {
+    switch (m_heightmap_view_mode) {
+        case HeightmapViewMode::Flat:
+            m_heightmapRenderer.SetZExtent(0.0f);
+            break;
+        case HeightmapViewMode::Raised:
+            m_heightmapRenderer.SetZExtent(10.0f);
+            break;
+        case HeightmapViewMode::Full:
+        case HeightmapViewMode::FullWithTilemap:
+            m_heightmapRenderer.SetZExtent(32.0f);
+            break;
+    }
+}
+
+void MyGLCanvas::SetEditorMode(EditorMode mode) {
+    if (m_editor_mode != EditorMode::Heightmap && mode == EditorMode::Heightmap) {
+        m_non_heightmap_z_extent = m_heightmapRenderer.GetZExtent();
+        ApplyHeightmapViewMode();
+    } else if (m_editor_mode == EditorMode::Heightmap && mode != EditorMode::Heightmap) {
+        m_heightmapRenderer.SetZExtent(m_non_heightmap_z_extent);
+    }
+
+    m_editor_mode = mode;
+    if (IsAnyEditMode()) {
+        ClampBackgroundSelection();
+        if (IsHeightmapEditMode()) {
+            SelectHeightmapCellAt(m_last_mouse_pos);
+            m_heightmapRenderer.SetHoverPoint(ScreenToWorldX(m_last_mouse_pos.x), ScreenToWorldY(m_last_mouse_pos.y));
+        } else {
+            SelectBackgroundCellAt(m_last_mouse_pos);
+            m_heightmapRenderer.ClearHover();
+        }
+        SetCursor(wxCursor(wxCURSOR_ARROW));
+    }
+    UpdateStatusBar();
+}
+
+bool MyGLCanvas::SelectHeightmapCellAt(const wxPoint& point) {
+    auto map = CurrentRoomMap();
+    if (!map || point == wxDefaultPosition) {
+        return false;
+    }
+
+    m_heightmapRenderer.SetHoverPoint(ScreenToWorldX(point.x), ScreenToWorldY(point.y));
+    int hover_x = m_heightmapRenderer.GetHoverX();
+    int hover_y = m_heightmapRenderer.GetHoverY();
+    if (hover_x < 0 || hover_y < 0 || hover_x >= map->GetHeightmapWidth() || hover_y >= map->GetHeightmapHeight()) {
+        return false;
+    }
+
+    m_background_selected_x = hover_x;
+    m_background_selected_y = hover_y;
+    m_background_has_selection = true;
+    return true;
+}
+
+bool MyGLCanvas::SelectBackgroundCellAt(const wxPoint& point) {
+    auto map = CurrentRoomMap();
+    if (!map || point == wxDefaultPosition) {
+        return false;
+    }
+
+    float zoom = std::max(ZoomFactor(), 0.0001f);
+    float cell_w = 32.0f * zoom;
+    float cell_h = 32.0f * zoom;
+    float x_offset = CurrentEditLayer() == Tilemap3D::Layer::FG ? -32.0f : 0.0f;
+
+    bool found = false;
+    int best_x = -1;
+    int best_y = -1;
+
+    // Match draw order so overlap resolves to the top-most rendered cell.
+    for (int y = 0; y < m_mapRenderer.GetRoomHeight(); ++y) {
+        for (int x = 0; x < m_mapRenderer.GetRoomWidth(); ++x) {
+            float world_x = 32.0f * static_cast<float>(x) - 32.0f * static_cast<float>(y) + 512.0f + x_offset;
+            float world_y = 16.0f * static_cast<float>(x) + 16.0f * static_cast<float>(y) + 100.0f;
+            float left = world_x * zoom + m_cam_x;
+            float top = world_y * zoom + m_cam_y;
+            float right = left + cell_w;
+            float bottom = top + cell_h;
+            if (static_cast<float>(point.x) >= left &&
+                static_cast<float>(point.x) <= right &&
+                static_cast<float>(point.y) >= top &&
+                static_cast<float>(point.y) <= bottom) {
+                found = true;
+                best_x = x;
+                best_y = y;
+            }
+        }
+    }
+
+    if (!found) {
+        return false;
+    }
+
+    m_background_selected_x = best_x;
+    m_background_selected_y = best_y;
+    m_background_has_selection = true;
+    return true;
+}
+
+void MyGLCanvas::ClampBackgroundSelection() {
+    auto map = CurrentRoomMap();
+    int width = IsHeightmapEditMode() && map ? map->GetHeightmapWidth() : m_mapRenderer.GetRoomWidth();
+    int height = IsHeightmapEditMode() && map ? map->GetHeightmapHeight() : m_mapRenderer.GetRoomHeight();
+    if (width <= 0 || height <= 0) {
+        m_background_has_selection = false;
+        m_background_selected_x = 0;
+        m_background_selected_y = 0;
+        return;
+    }
+    m_background_selected_x = std::clamp(m_background_selected_x, 0, width - 1);
+    m_background_selected_y = std::clamp(m_background_selected_y, 0, height - 1);
+    m_background_has_selection = true;
+}
+
+void MyGLCanvas::MoveBackgroundSelection(int dx, int dy) {
+    if (!m_background_has_selection) {
+        m_background_selected_x = 0;
+        m_background_selected_y = 0;
+        m_background_has_selection = true;
+    }
+    m_background_selected_x += dx;
+    m_background_selected_y += dy;
+    ClampBackgroundSelection();
+}
+
+std::shared_ptr<Tilemap3D> MyGLCanvas::CurrentRoomMap() const {
+    auto rd = m_gd ? m_gd->GetRoomData() : nullptr;
+    if (!rd) {
+        return nullptr;
+    }
+    auto map_entry = rd->GetMapForRoom(m_current_room);
+    return map_entry ? map_entry->GetData() : nullptr;
+}
+
+int MyGLCanvas::SelectedBackgroundBlockIndex() const {
+    if (!m_background_has_selection || m_background_selected_x < 0 || m_background_selected_y < 0) {
+        return -1;
+    }
+    if (m_background_selected_x >= m_mapRenderer.GetRoomWidth() || m_background_selected_y >= m_mapRenderer.GetRoomHeight()) {
+        return -1;
+    }
+    return m_background_selected_y * m_mapRenderer.GetRoomWidth() + m_background_selected_x;
+}
+
+int MyGLCanvas::SelectedHeightmapCellX() const {
+    auto map = CurrentRoomMap();
+    if (!map || !m_background_has_selection) {
+        return -1;
+    }
+    if (m_background_selected_x < 0 || m_background_selected_x >= map->GetHeightmapWidth()) {
+        return -1;
+    }
+    return m_background_selected_x;
+}
+
+int MyGLCanvas::SelectedHeightmapCellY() const {
+    auto map = CurrentRoomMap();
+    if (!map || !m_background_has_selection) {
+        return -1;
+    }
+    if (m_background_selected_y < 0 || m_background_selected_y >= map->GetHeightmapHeight()) {
+        return -1;
+    }
+    return m_background_selected_y;
+}
+
+uint16_t MyGLCanvas::SelectedHeightmapCellValue() const {
+    auto map = CurrentRoomMap();
+    int x = SelectedHeightmapCellX();
+    int y = SelectedHeightmapCellY();
+    if (!map || x < 0 || y < 0) {
+        return 0;
+    }
+    return map->GetHeightmapCell({x, y});
+}
+
+uint16_t MyGLCanvas::SelectedBackgroundBlockId() const {
+    auto map = CurrentRoomMap();
+    int block_index = SelectedBackgroundBlockIndex();
+    if (!map || block_index < 0) {
+        return 0;
+    }
+    const auto& layer_data = map->GetLayerData(CurrentEditLayer());
+    if (block_index >= static_cast<int>(layer_data.size())) {
+        return 0;
+    }
+    return layer_data[static_cast<std::size_t>(block_index)];
+}
+
+void MyGLCanvas::CopySelectedBackgroundBlock() {
+    int block_index = SelectedBackgroundBlockIndex();
+    auto map = CurrentRoomMap();
+    if (!map || block_index < 0) {
+        return;
+    }
+    const auto& layer_data = map->GetLayerData(CurrentEditLayer());
+    if (block_index >= static_cast<int>(layer_data.size())) {
+        return;
+    }
+    m_background_clipboard_block_id = layer_data[static_cast<std::size_t>(block_index)];
+    m_background_clipboard_valid = true;
+}
+
+void MyGLCanvas::CopySelectedHeightmapCell() {
+    uint16_t value = SelectedHeightmapCellValue();
+    if (!m_background_has_selection) {
+        return;
+    }
+    m_background_clipboard_block_id = value;
+    m_background_clipboard_valid = true;
+}
+
+void MyGLCanvas::ClearBackgroundClipboard() {
+    m_background_clipboard_valid = false;
+    m_background_clipboard_block_id = 0;
+}
+
+void MyGLCanvas::ReloadCurrentRoomMapView() {
+    if (m_tileswap_preview_map) {
+        m_mapRenderer.LoadPreviewRoom(m_current_room, *m_tileswap_preview_map);
+    } else {
+        m_mapRenderer.LoadRoom(m_current_room);
+    }
+}
+
+void MyGLCanvas::PasteSelectedBackgroundBlock() {
+    auto map = CurrentRoomMap();
+    int block_index = SelectedBackgroundBlockIndex();
+    if (!m_background_clipboard_valid || !map || block_index < 0) {
+        return;
+    }
+    Tilemap3D::Layer layer = CurrentEditLayer();
+    map->SetBlock(m_background_clipboard_block_id, static_cast<uint16_t>(block_index), layer);
+    if (m_tileswap_preview_map) {
+        m_tileswap_preview_map->SetBlock(m_background_clipboard_block_id, static_cast<uint16_t>(block_index), layer);
+    }
+    ReloadCurrentRoomMapView();
+}
+
+void MyGLCanvas::PasteSelectedHeightmapCell() {
+    auto map = CurrentRoomMap();
+    int x = SelectedHeightmapCellX();
+    int y = SelectedHeightmapCellY();
+    if (!m_background_clipboard_valid || !map || x < 0 || y < 0) {
+        return;
+    }
+    map->SetHeightmapCell({x, y}, m_background_clipboard_block_id);
+    if (m_tileswap_preview_map) {
+        m_tileswap_preview_map->SetHeightmapCell({x, y}, m_background_clipboard_block_id);
+    }
+    ReloadCurrentRoomMapView();
+}
+
+void MyGLCanvas::RenderBackgroundEditorOverlay(int width, int height) {
+    auto map = CurrentRoomMap();
+    if (!map) {
+        return;
+    }
+
+    float zoom = std::max(ZoomFactor(), 0.0001f);
+    Tilemap3D::Layer layer = CurrentEditLayer();
+    auto block_screen_origin = [this, zoom, layer](int x, int y) {
+        float x_offset = layer == Tilemap3D::Layer::FG ? -32.0f : 0.0f;
+        float px = 32.0f * static_cast<float>(x) - 32.0f * static_cast<float>(y) + 512.0f + x_offset;
+        float py = 16.0f * static_cast<float>(x) + 16.0f * static_cast<float>(y) + 100.0f;
+        return PickPoint{px * zoom + m_cam_x, py * zoom + m_cam_y};
+    };
+
+    glUseProgram(0);
+    for (int i = 0; i <= 5; ++i) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glDisable(GL_TEXTURE_2D);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glDisable(GL_STENCIL_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, width, height, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
+    glLineWidth(1.0f);
+    glColor4f(0.78f, 0.78f, 0.78f, 0.7f);
+    glBegin(GL_LINES);
+    for (int y = 0; y < m_mapRenderer.GetRoomHeight(); ++y) {
+        for (int x = 0; x < m_mapRenderer.GetRoomWidth(); ++x) {
+            PickPoint origin = block_screen_origin(x, y);
+            float left = origin.x;
+            float top = origin.y;
+            float right = left + 32.0f * zoom;
+            float bottom = top + 32.0f * zoom;
+            glVertex2f(left, top);
+            glVertex2f(right, top);
+            glVertex2f(right, top);
+            glVertex2f(right, bottom);
+            glVertex2f(right, bottom);
+            glVertex2f(left, bottom);
+            glVertex2f(left, bottom);
+            glVertex2f(left, top);
+        }
+    }
+    glEnd();
+
+    if (m_background_has_selection) {
+        PickPoint origin = block_screen_origin(m_background_selected_x, m_background_selected_y);
+        float left = origin.x;
+        float top = origin.y;
+        float right = left + 32.0f * zoom;
+        float bottom = top + 32.0f * zoom;
+        glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+        glBegin(GL_LINE_LOOP);
+        glVertex2f(left, top);
+        glVertex2f(right, top);
+        glVertex2f(right, bottom);
+        glVertex2f(left, bottom);
+        glEnd();
+    }
+
+    if (m_background_show_block_ids) {
+        constexpr float scale = 1.0f;
+        constexpr float glyph_advance = 6.0f;
+        constexpr float glyph_height = 7.0f;
+        for (int y = 0; y < m_mapRenderer.GetRoomHeight(); ++y) {
+            for (int x = 0; x < m_mapRenderer.GetRoomWidth(); ++x) {
+                int block_index = y * m_mapRenderer.GetRoomWidth() + x;
+                const auto& layer_data = map->GetLayerData(layer);
+                if (block_index < 0 || block_index >= static_cast<int>(layer_data.size())) {
+                    continue;
+                }
+                std::string label = HexWord(layer_data[static_cast<std::size_t>(block_index)]);
+                PickPoint origin = block_screen_origin(x, y);
+                float label_width = static_cast<float>(label.size()) * glyph_advance * scale;
+                float text_x = origin.x + (32.0f * zoom - label_width) * 0.5f;
+                float text_y = origin.y + (32.0f * zoom - glyph_height * scale) * 0.5f;
+                glColor4f(0.05f, 0.05f, 0.05f, 0.78f);
+                glBegin(GL_QUADS);
+                glVertex2f(text_x - 2.0f, text_y - 1.0f);
+                glVertex2f(text_x + label_width + 2.0f, text_y - 1.0f);
+                glVertex2f(text_x + label_width + 2.0f, text_y + glyph_height + 1.0f);
+                glVertex2f(text_x - 2.0f, text_y + glyph_height + 1.0f);
+                glEnd();
+                glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+                DrawOverlayText(label, text_x, text_y, scale);
+            }
+        }
+    }
+
+    if (m_background_has_selection && m_background_clipboard_valid) {
+        uint16_t current_block = SelectedBackgroundBlockId();
+        if (current_block != m_background_clipboard_block_id) {
+            PickPoint origin = block_screen_origin(m_background_selected_x, m_background_selected_y);
+            float left = origin.x;
+            float top = origin.y;
+            float right = left + 32.0f * zoom;
+            float bottom = top + 32.0f * zoom;
+            glColor4f(1.0f, 1.0f, 1.0f, 0.12f);
+            glBegin(GL_QUADS);
+            glVertex2f(left, top);
+            glVertex2f(right, top);
+            glVertex2f(right, bottom);
+            glVertex2f(left, bottom);
+            glEnd();
+            glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
+            DrawOverlayText(HexWord(m_background_clipboard_block_id), left + 2.0f, top + 2.0f, 1.0f);
+        }
+    }
+}
+
+void MyGLCanvas::RenderHeightmapEditorOverlay(int width, int height) {
+    auto map = CurrentRoomMap();
+    if (!map || !m_background_has_selection) {
+        return;
+    }
+
+    int x = SelectedHeightmapCellX();
+    int y = SelectedHeightmapCellY();
+    if (x < 0 || y < 0) {
+        return;
+    }
+
+    uint8_t z = map->GetHeight({x, y});
+    float room_left = static_cast<float>(m_mapRenderer.GetRoomLeft());
+    float room_top = static_cast<float>(m_mapRenderer.GetRoomTop());
+    PickPoint center = ProjectHeightmapGridPoint(
+        static_cast<float>(x) + 0.5f,
+        static_cast<float>(y) + 0.5f,
+        z,
+        room_left,
+        room_top,
+        m_heightmapRenderer.GetZExtent());
+
+    float zoom = std::max(ZoomFactor(), 0.0001f);
+    float cx = center.x * zoom + m_cam_x;
+    float cy = center.y * zoom + m_cam_y;
+
+    glUseProgram(0);
+    for (int i = 0; i <= 5; ++i) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glDisable(GL_TEXTURE_2D);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glDisable(GL_STENCIL_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, width, height, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
+    glColor4f(1.0f, 1.0f, 1.0f, 0.98f);
+    glLineWidth(2.0f);
+    glBegin(GL_LINE_LOOP);
+    glVertex2f(cx, cy - 16.0f * zoom);
+    glVertex2f(cx + 32.0f * zoom, cy);
+    glVertex2f(cx, cy + 16.0f * zoom);
+    glVertex2f(cx - 32.0f * zoom, cy);
+    glEnd();
+
 }
 
 void MyGLCanvas::UpdateEntityDrag(const wxMouseEvent& evt) {
@@ -3374,20 +3452,41 @@ void MyGLCanvas::OnPaint(wxPaintEvent&) {
     // This is the entry point for drawing. wxPaintDC is a helper that ensures 
     // the windowing system knows we are drawing.
     wxPaintDC dc(this);
+    if (!m_context) {
+        m_context = new wxGLContext(this);
+    }
+
     // Set the current OpenGL context to this window.
-    SetCurrent(*m_context);
+    if (!m_context || !SetCurrent(*m_context)) {
+        m_gl_init_failed = true;
+        wxLogError("Failed to make the OpenGL context current.");
+        return;
+    }
     
     // Perform one-time initialization of shaders and textures
+    if (m_gl_init_failed) {
+        return;
+    }
+
     if (!m_initialized) {
+        if (!InitGLLoader()) {
+            m_gl_init_failed = true;
+            wxLogError("OpenGL initialization failed. Check GLEW and graphics driver setup.");
+            return;
+        }
         m_mapRenderer.Init();
         m_spriteRenderer.Init();
         LoadRoom(m_current_room);
         m_initialized = true;
     }
     
-    // Set up the viewport and simple orthographic projection
+    // Set up the viewport and simple orthographic projection.
+    // wx reports client size in logical pixels; OpenGL needs the backing framebuffer size.
     int w, h; GetClientSize(&w, &h);
-    glViewport(0, 0, w, h); 
+    const float content_scale = static_cast<float>(GetContentScaleFactor());
+    const int fb_w = std::max(1, static_cast<int>(std::lround(static_cast<float>(w) * content_scale)));
+    const int fb_h = std::max(1, static_cast<int>(std::lround(static_cast<float>(h) * content_scale)));
+    glViewport(0, 0, fb_w, fb_h); 
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); 
     // This sets up a 2D coordinate system matching the window size in pixels
     glOrtho(0, w, h, 0, -1, 1);
@@ -3412,181 +3511,15 @@ void MyGLCanvas::OnPaint(wxPaintEvent&) {
     m_selected_entity_idx = selected_entity_id != 0 ? FindInstanceIndex(selected_entity_id) : -1;
     m_hovered_entity_idx = hovered_entity_id != 0 ? FindInstanceIndex(hovered_entity_id) : -1;
 
-    // Delegate drawing in strict layer order to keep occlusion deterministic.
-    // Earlier passes also prepare stencil information used by later passes.
-    // 1. Draw the isometric map background and foreground
-    m_mapRenderer.Render(m_cam_x, m_cam_y);
-    // 2. Draw the heightmap overlay when enabled
-    if (m_show_heightmap) {
-        m_heightmapRenderer.Render();
-    }
-    // 3. Draw tile swap source/destination outlines
-    RenderTileSwapOutlines();
-    // 4. Draw door cells and their tilemap traces
-    RenderDoors();
-    // 5. Draw room warp handles at floor level
-    RenderWarps();
-    // 6. Draw the animated sprites on top
-    SpriteRenderer::OcclusionMode occlusion_mode = SpriteRenderer::OcclusionMode::AlwaysOnTop;
-    switch (m_entity_occlusion_idx) {
-        case 1:
-            occlusion_mode = SpriteRenderer::OcclusionMode::ObscuredTransparent;
-            break;
-        case 2:
-            occlusion_mode = SpriteRenderer::OcclusionMode::ObscuredHidden;
-            break;
-        case 0:
-        default:
-            occlusion_mode = SpriteRenderer::OcclusionMode::AlwaysOnTop;
-            break;
-    }
-    // Stencil convention used by sprite rendering:
-    // bit 0x01: occluded by heightmap geometry
-    // bit 0x04: covered by foreground-priority map tiles
-    // When heightmap is hidden we test both (0x05) so sprites still clip behind FG.
-    const GLint sprite_occlusion_ref = m_show_heightmap ? 0x01 : 0x05;
-    const GLint sprite_occlusion_mask = m_show_heightmap ? 0x01 : 0x05;
-    std::set<uint32_t> collided_entities = FindCollidedEntities(m_instances);
-    int selected_collision_warning = 0;
-    if (m_selected_entity_idx >= 0 && m_selected_entity_idx < static_cast<int>(m_instances.size())) {
-        const SpriteInstance& selected = m_instances[static_cast<std::size_t>(m_selected_entity_idx)];
-        if (EntityCollidesWithHeightmap(selected)) {
-            selected_collision_warning = 2;
-        } else if (collided_entities.count(selected.instance_id) != 0) {
-            selected_collision_warning = 1;
-        }
-    }
-    m_spriteRenderer.Render(
-        m_instances,
-        m_cam_x,
-        m_cam_y,
-        m_selected_entity_idx,
-        selected_collision_warning,
-        occlusion_mode,
-        m_show_hitboxes,
-        sprite_occlusion_ref,
-        sprite_occlusion_mask,
-        [this](
-            GLint entity_back_depth,
-            GLint entity_front_depth,
-            float entity_z,
-            float entity_min_x,
-            float entity_min_y,
-            float entity_max_x,
-            float entity_max_y,
-            float entity_top_z,
-            float sprite_min_x,
-            float sprite_min_y,
-            float sprite_max_x,
-            float sprite_max_y) {
-            m_heightmapRenderer.BuildEntityOcclusionStencil(
-                entity_back_depth,
-                entity_front_depth,
-                entity_z,
-                entity_min_x,
-                entity_min_y,
-                entity_max_x,
-                entity_max_y,
-                entity_top_z,
-                sprite_min_x,
-                sprite_min_y,
-                sprite_max_x,
-                sprite_max_y);
-            if (!m_show_heightmap) {
-                m_mapRenderer.BuildForegroundCoverageStencil();
-            }
-        },
-        [this](float x, float y) {
-            return FloorUnderPoint(x, y);
-        },
-        [this](float min_x, float min_y, float max_x, float max_y, float z) {
-            return ShadowOccludedByHeightmap(min_x, min_y, max_x, max_y, z);
-        },
-        [this](float min_x, float min_y, float max_x, float max_y, float z, float screen_min_x, float screen_min_y, float screen_max_x, float screen_max_y) {
-            GLint back_depth = std::clamp(static_cast<int>(std::floor(min_x + min_y + 1.0f)), 0, 255);
-            GLint front_depth = std::clamp(static_cast<int>(std::ceil(max_x + max_y + 25.0f)), 0, 255);
-            m_heightmapRenderer.BuildEntityOcclusionStencil(
-                back_depth,
-                front_depth,
-                z,
-                min_x,
-                min_y,
-                max_x,
-                max_y,
-                z + 0.125f,
-                screen_min_x,
-                screen_min_y,
-                screen_max_x,
-                screen_max_y);
-        },
-        [&collided_entities](uint32_t instance_id) {
-            return collided_entities.count(instance_id) != 0;
-        });
-    RenderEntityControls();
-    RenderSelectedEntityTooltip();
-    RenderSelectedWarpTooltip();
-    RenderSelectedDoorTooltip();
-    RenderSelectedTileSwapRegionTooltip();
-    if (m_debug_occlusion &&
-        m_selected_entity_idx >= 0 &&
-        m_selected_entity_idx < static_cast<int>(m_instances.size())) {
-        const auto& selected = m_instances[static_cast<std::size_t>(m_selected_entity_idx)];
-        auto depth_range = EntityOcclusionDebugDepthRange(selected);
-        float center_x = selected.map_x + selected.hitbox_offset;
-        float center_y = selected.map_y + selected.hitbox_offset;
-        float half_base = selected.hitbox_base * 0.5f;
-        float top_z = selected.map_z + std::max(selected.hitbox_height, 0.125f);
-        std::array<PickPoint, 8> clip_bounds = {
-            ProjectEntityGridPoint(selected, center_x - half_base, center_y - half_base, selected.map_z),
-            ProjectEntityGridPoint(selected, center_x + half_base, center_y - half_base, selected.map_z),
-            ProjectEntityGridPoint(selected, center_x + half_base, center_y + half_base, selected.map_z),
-            ProjectEntityGridPoint(selected, center_x - half_base, center_y + half_base, selected.map_z),
-            ProjectEntityGridPoint(selected, center_x - half_base, center_y - half_base, top_z),
-            ProjectEntityGridPoint(selected, center_x + half_base, center_y - half_base, top_z),
-            ProjectEntityGridPoint(selected, center_x + half_base, center_y + half_base, top_z),
-            ProjectEntityGridPoint(selected, center_x - half_base, center_y + half_base, top_z)
-        };
-        float clip_min_x = clip_bounds.front().x;
-        float clip_min_y = clip_bounds.front().y;
-        float clip_max_x = clip_bounds.front().x;
-        float clip_max_y = clip_bounds.front().y;
-        for (const auto& point : clip_bounds) {
-            clip_min_x = std::min(clip_min_x, point.x);
-            clip_min_y = std::min(clip_min_y, point.y);
-            clip_max_x = std::max(clip_max_x, point.x);
-            clip_max_y = std::max(clip_max_y, point.y);
-        }
-        if (!m_show_heightmap) {
-            m_heightmapRenderer.BuildEntityOcclusionStencil(
-                depth_range.first,
-                depth_range.second,
-                selected.map_z,
-                center_x - half_base,
-                center_y - half_base,
-                center_x + half_base,
-                center_y + half_base,
-                top_z,
-                clip_min_x,
-                clip_min_y,
-                clip_max_x,
-                clip_max_y);
-            m_mapRenderer.BuildForegroundCoverageStencil();
-            DrawStencilOverlay(m_cam_x, m_cam_y, w, h, 0x04, 0x04, 0.0f, 0.8f, 1.0f, 0.22f);
-            DrawStencilOverlay(m_cam_x, m_cam_y, w, h, 0x05, 0x05, 1.0f, 0.0f, 1.0f, 0.38f);
-        }
-        m_heightmapRenderer.RenderEntityOcclusionDebug(
-            depth_range.first,
-            depth_range.second,
-            selected.map_z,
-            center_x - half_base,
-            center_y - half_base,
-            center_x + half_base,
-            center_y + half_base,
-            top_z);
+    if (IsHeightmapEditMode()) {
+        GLCanvasHeightmapMode(*this).Render(w, h);
+        return;
     }
 
-    RenderRoomInfoTable(w, h);
+    if (IsLayerEditMode()) {
+        GLCanvasLayerEditMode(*this).Render(w, h);
+        return;
+    }
 
-    // Display the buffer on screen (double buffering)
-    SwapBuffers();
+    GLCanvasRoomMode(*this).Render(w, h);
 }

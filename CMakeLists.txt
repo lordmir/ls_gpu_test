@@ -22,6 +22,9 @@ set(SOURCES
     main.cpp
     MainFrame.cpp
     GLCanvas.cpp
+    GLCanvasHeightmapMode.cpp
+    GLCanvasLayerEditMode.cpp
+    GLCanvasRoomMode.cpp
     GLCanvasEntityEditor.cpp
     GLCanvasWarpEditor.cpp
     GLCanvasTileDoorEditor.cpp
@@ -41,6 +44,7 @@ target_link_libraries(gpu_demo PRIVATE
     wx::base
     wx::gl
     OpenGL::GL
+    GLEW::GLEW
     landstalker
 )
 

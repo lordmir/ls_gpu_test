@@ -376,6 +376,11 @@ void HeightmapRenderer::ClearHover()
     m_hover_y = -1;
 }
 
+void HeightmapRenderer::SetZExtent(float value)
+{
+    m_z_extent = std::clamp(value, 0.0f, 64.0f);
+}
+
 void HeightmapRenderer::Render()
 {
     if (m_room_w <= 0 || m_room_h <= 0) {

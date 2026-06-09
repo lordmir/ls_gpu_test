@@ -1,12 +1,14 @@
 #ifndef GL_CANVAS_H
 #define GL_CANVAS_H
 
+#include "GLLoader.h"
 #include <wx/wx.h>
 #include <wx/glcanvas.h>
 #include <wx/stopwatch.h>
 #include <memory>
 #include <vector>
 #include <map>
+#include <set>
 #include <landstalker/main/GameData.h>
 #include <landstalker/rooms/WarpList.h>
 #include "SpriteInstance.h"
@@ -39,10 +41,27 @@ public:
     void LoadRoom(uint16_t roomnum);
 
 private:
+    enum class EditorMode {
+        Room,
+        BackgroundLayer,
+        ForegroundLayer,
+        Heightmap
+    };
+
+    enum class HeightmapViewMode {
+        Flat = 1,
+        Raised = 2,
+        Full = 3,
+        FullWithTilemap = 4
+    };
+
     friend class GLCanvasEntityEditor;
     friend class GLCanvasWarpEditor;
     friend class GLCanvasTileDoorEditor;
     friend class GLCanvasObjectCoordinator;
+    friend class GLCanvasHeightmapMode;
+    friend class GLCanvasLayerEditMode;
+    friend class GLCanvasRoomMode;
 
     void OnTimer(wxTimerEvent& evt);
     void OnKeyDown(wxKeyEvent& evt);
@@ -133,9 +152,39 @@ private:
     int FindInstanceIndex(uint32_t instance_id) const;
     int FindWarpIndex(uint32_t instance_id) const;
     void RefreshObjectPlacementsFromHeightmap();
+    bool IsLayerEditMode() const;
+    bool IsHeightmapEditMode() const;
+    bool IsAnyEditMode() const;
+    Landstalker::Tilemap3D::Layer CurrentEditLayer() const;
+    void SetEditorMode(EditorMode mode);
+    void ApplyHeightmapViewMode();
+    bool SelectBackgroundCellAt(const wxPoint& point);
+    bool SelectHeightmapCellAt(const wxPoint& point);
+    void ClampBackgroundSelection();
+    void MoveBackgroundSelection(int dx, int dy);
+    std::shared_ptr<Landstalker::Tilemap3D> CurrentRoomMap() const;
+    int SelectedBackgroundBlockIndex() const;
+    uint16_t SelectedBackgroundBlockId() const;
+    int SelectedHeightmapCellX() const;
+    int SelectedHeightmapCellY() const;
+    uint16_t SelectedHeightmapCellValue() const;
+    void CopySelectedBackgroundBlock();
+    void CopySelectedHeightmapCell();
+    void ClearBackgroundClipboard();
+    void PasteSelectedBackgroundBlock();
+    void PasteSelectedHeightmapCell();
+    void ReloadCurrentRoomMapView();
+    void RenderBackgroundEditorOverlay(int width, int height);
+    void RenderHeightmapEditorOverlay(int width, int height);
     float ZoomFactor() const;
     float ScreenToWorldX(int screen_x) const;
     float ScreenToWorldY(int screen_y) const;
+    void PanCameraByStep(int dx, int dy, float speed = 20.0f);
+    void ChangeZoomStep(int delta, float anchor_x, float anchor_y);
+    void ResizeSelectedTileSwapByDelta(int dw, int dh);
+    void UpdateStatusBar();
+    void RenderStencilOverlay(int width, int height, GLint ref, GLint mask, float r, float g, float b, float a) const;
+    std::set<uint32_t> FindCollidedEntityIds() const;
 
     std::shared_ptr<Landstalker::GameData> m_gd;
     wxGLContext* m_context;
@@ -207,6 +256,16 @@ private:
     int m_entity_occlusion_idx;
     bool m_debug_occlusion;
     bool m_show_hitboxes;
+    EditorMode m_editor_mode;
+    HeightmapViewMode m_heightmap_view_mode;
+    float m_non_heightmap_z_extent;
+    bool m_foreground_show_background_underlay;
+    bool m_background_show_block_ids;
+    bool m_background_has_selection;
+    int m_background_selected_x;
+    int m_background_selected_y;
+    bool m_background_clipboard_valid;
+    uint16_t m_background_clipboard_block_id;
     bool m_tileswap_preview_active;
     int m_tileswap_preview_swap_index;
     bool m_door_preview_active;
@@ -215,6 +274,7 @@ private:
     uint16_t m_current_room;
     float m_cam_x, m_cam_y;
     int m_zoom_step_idx;
+    bool m_gl_init_failed;
     bool m_initialized;
     wxPoint m_last_mouse_pos;
     struct RoomInfoLink {
